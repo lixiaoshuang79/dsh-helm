@@ -23,7 +23,7 @@
 | 3458 | 入口节点 tunnel-client 健康端口 | 无（仅 loopback） | `127.0.0.1` |
 | 3080 | DSH web | 无登录墙；靠 loopback 绑定 + trustedHosts 围栏 | `127.0.0.1` |
 
-**信任边界总结**：系统整体是"本地可信、网络存疑"。节点之间永远是**星型**：Node Agent 只出站拨号 hub（`HelmNodeAgent.connect`，`ws://` 仅 loopback/test，生产 `wss://`），节点与节点之间没有任何直接通道；hub 是唯一路由者（`Router`）与唯一执行通道（`mcp.call`）。每台机器的 DSH 只通过本地 daemon 的 3457 MCP 端点（Bearer token）暴露给本机 Node Agent（`LocalDshBridge`），daemon 的 unix socket adapter 协议（`~/.agent-chatgpt-helm/run/daemon.sock`，无认证）绝不上网络。
+**信任边界总结**：系统整体是"本地可信、网络存疑"。节点之间永远是**星型**：Node Agent 只出站拨号 hub（`HelmNodeAgent.connect`，`ws://` 仅 loopback/test，生产 `wss://`），节点与节点之间没有任何直接通道；hub 是唯一路由者（`Router`）与唯一执行通道（`mcp.call`）。每台机器的 DSH 只通过本地 daemon 的 3457 MCP 端点（Bearer token）暴露给本机 Node Agent（`LocalHelmBackend`（默认 `McpLocalHelmBackend`）），daemon 的 unix socket adapter 协议（`~/.agent-chatgpt-helm/run/daemon.sock`，无认证）绝不上网络。
 
 ### 2.2 节点身份与握手（事实）
 
@@ -55,7 +55,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 ### 2.5 本地 daemon 边界（事实）
 
 - daemon（`@beforewave/agent-chatgpt-helm@0.1.1`）默认：unix socket adapter `~/.agent-chatgpt-helm/run/daemon.sock`（无认证，仅本机进程间）；HTTP MCP `127.0.0.1:3457/mcp`，Bearer token 来自 `~/.agent-chatgpt-helm/token`（`resolveCoreToken`：env `AGENT_CHATGPT_HELM_TOKEN` 优先，否则读文件；文件缺失时生成 32B base64url 并以 **0o600** 写入）。
-- Node Agent 的 `LocalDshBridge` **只用** 3457 `/mcp`（带 Bearer），刻意不碰 unix socket adapter 协议（`bridge.ts` 注释：loopback-only, unauthenticated）。因此 daemon.sock 协议永不因本控制平面而上网络。
+- Node Agent 的 `LocalHelmBackend`（默认 `McpLocalHelmBackend`） **只用** 3457 `/mcp`（带 Bearer），刻意不碰 unix socket adapter 协议（`bridge.ts` 注释：loopback-only, unauthenticated）。因此 daemon.sock 协议永不因本控制平面而上网络。
 
 ### 2.6 上游与单机套件（事实）
 
@@ -164,7 +164,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 - **威胁描述**：本机恶意进程/其他用户直接打 daemon 的 3457 `/mcp`（偷读 token 后调任意工具）；或尝试把 unix socket adapter（`daemon.sock`，无认证）暴露/转发到网络。
 - **攻击场景**：同机恶意进程读 `~/.agent-chatgpt-helm/token`（0600，同用户可读），然后 POST `http://127.0.0.1:3457/mcp` 调 `sessions_create`/`code_read_file`；或攻击者把 `daemon.sock` 通过 socat 转发到公网端口——只要控制平面/套件没有把 sock 流量引向网络的路径，该转发属于"外部行为"，但一旦发生则无认证直通。
 - **影响**：本机 DSH 全量能力被任意本地进程调用（读代码、建会话、发 prompt）；sock 上网络后远程可直达无认证执行面。
-- **缓解**：daemon 绑 `127.0.0.1:3457`（upstream 默认，`config.d.ts` 的 `http.host=127.0.0.1`）；`/mcp` 需 `Authorization: Bearer`（token 由 `resolveCoreToken` 0o600 落盘，或 env `AGENT_CHATGPT_HELM_TOKEN`）；`LocalDshBridge` 只走该认证端点，"keeps the node agent out of the daemon's unix-socket adapter protocol (loopback-only, unauthenticated)"——**控制平面代码没有任何路径会转发 daemon.sock 流量**；3471 的 hub MCP 是唯一网络面（且默认 loopback）。
+- **缓解**：daemon 绑 `127.0.0.1:3457`（upstream 默认，`config.d.ts` 的 `http.host=127.0.0.1`）；`/mcp` 需 `Authorization: Bearer`（token 由 `resolveCoreToken` 0o600 落盘，或 env `AGENT_CHATGPT_HELM_TOKEN`）；`LocalHelmBackend`（默认 `McpLocalHelmBackend`） 只走该认证端点，"keeps the node agent out of the daemon's unix-socket adapter protocol (loopback-only, unauthenticated)"——**控制平面代码没有任何路径会转发 daemon.sock 流量**；3471 的 hub MCP 是唯一网络面（且默认 loopback）。
 - **残余风险**：daemon.sock 的目录（`~/.agent-chatgpt-helm/run/`）权限取决于 umask，同用户/同组进程可连（unix socket 无认证是 upstream 设计，靠目录权限围栏）；`/healthz` 无认证（loopback 可接受，被反代暴露则泄露状态信息）；token 文件与 node.json 同用户可读——**本机多用户场景需要逐用户隔离**（当前假设单用户可信）。
 
 ### T11 上游供应链（beforewave npm 包固定版本、npm tarball pin）
@@ -180,7 +180,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 - **威胁描述**：DSH web（3080）无登录墙；若被本机恶意进程、浏览器中的恶意网页（localhost CSRF/DNS rebinding）、或网络暴露，即可驱动 DSH 会话。
 - **攻击场景**：用户打开恶意网页，页面里的脚本向 `http://127.0.0.1:3080/...` 发请求（localhost CSRF）——若 DSH web 的 API 不校验 Origin/无 CSRF token，恶意网页可建会话、发 prompt；或恶意浏览器扩展直接 fetch 3080。
 - **影响**：本机 DSH 全量会话/工作区/文件能力被劫持；恶意网页可静默建会话发 prompt（模型执行任意工具）。
-- **缓解（前提与边界）**：**前提**——服务只绑 `127.0.0.1:3080`（loopback 围栏）+ DSH web 的 trustedHosts 白名单防 DNS rebinding；**边界**——Node Agent 不直接访问 3080（一切经本地 daemon 3457 MCP 语义，`LocalDshBridge`），控制平面本身不把 3080 暴露给网络；单机套件的 watchdog 也只在本机探测 3080；隧道入口（3458→3457）从不触碰 3080 的 HTTP 面。
+- **缓解（前提与边界）**：**前提**——服务只绑 `127.0.0.1:3080`（loopback 围栏）+ DSH web 的 trustedHosts 白名单防 DNS rebinding；**边界**——Node Agent 不直接访问 3080（一切经本地 daemon 3457 MCP 语义，`LocalHelmBackend`（默认 `McpLocalHelmBackend`）），控制平面本身不把 3080 暴露给网络；单机套件的 watchdog 也只在本机探测 3080；隧道入口（3458→3457）从不触碰 3080 的 HTTP 面。
 - **残余风险**：同机器上的任何进程（含浏览器标签页）都在"可信"圈内——**浏览器侧攻击面是真实存在的**（localhost CSRF、恶意扩展）；多用户机器上其他用户可访问 3080；一旦有人用反代把 3080 暴露到网络（配置失误），无认证问题直接暴露公网；trustedHosts 只防 Host 头欺骗，不防同机进程。
 
 ### T13 DoS（连接风暴、心跳洪泛、MCP 工具滥用）

@@ -90,7 +90,7 @@ ls -l ~/.dsh/helm/node.json        # 期望 -rw-------（0600）
 }
 ```
 
-> `local_mcp_token` 与 hub 无关，它是**本机** helm daemon（`127.0.0.1:3457/mcp`）的 Bearer token，内容在 `~/.agent-chatgpt-helm/token`（daemon 首次启动自动生成，0600）。node agent 的 `LocalDshBridge` 只走这个认证端点，**不碰** daemon 的 unix socket adapter 协议（`~/.agent-chatgpt-helm/run/daemon.sock`，无认证、绝不上网）。
+> `local_mcp_token` 与 hub 无关，它是**本机** helm daemon（`127.0.0.1:3457/mcp`）的 Bearer token，内容在 `~/.agent-chatgpt-helm/token`（daemon 首次启动自动生成，0600）。node agent 的 `LocalHelmBackend`（默认 `McpLocalHelmBackend`）只走这个认证端点，**不碰** daemon 的 unix socket adapter 协议（`~/.agent-chatgpt-helm/run/daemon.sock`，无认证、绝不上网）。
 > 可用环境变量覆盖（`agent-cli.ts` 支持，适合 service 场景）：`DSH_HELM_HUB` / `DSH_HELM_MCP_URL` / `DSH_HELM_MCP_TOKEN`。
 
 ## 4. hub 侧注册 token

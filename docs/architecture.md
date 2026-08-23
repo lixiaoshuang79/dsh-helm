@@ -55,7 +55,7 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
    │ Node Agent │     │ Node Agent │     │ Node Agent │          │ Hub 自身节点 │
    │  (macOS)   │     │ (Windows)  │     │  (Linux)   │          │  (入口节点)  │
    └───┬────────┘     └─────┬──────┘     └──────┬─────┘          └──────┬──────┘
-       │ LocalDshBridge（MCP client）           │                        │
+       │ LocalHelmBackend（默认 McpLocalHelmBackend → 本地 3457 MCP）           │                        │
        │ http://127.0.0.1:3457/mcp + Bearer     │                        │
    ┌───┴────────┐     ┌─────┴──────┐     ┌──────┴─────┐          ┌──────┴──────┐
    │ helm daemon│     │ helm daemon│     │ helm daemon│          │ helm daemon │
@@ -126,7 +126,7 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
 ### 3.4 `@dsh-helm/node-agent` —— 每台机器的节点代理
 
 - **`loadConfig`**（`config.ts`）：`~/.dsh/helm/node.json`（0600）。首次运行生成 `node_id = randomUUID()` 与 `token = randomBytes(32).base64url`，`display_name` 缺省 `hostname()`；`local_mcp_url` 缺省 `http://127.0.0.1:3457/mcp`，`local_mcp_token` 取自 daemon 的 token 文件；`local_probe_ms` 10s、`reconcile_ms` 60s。token 只从私有文件读取，**绝不出现在 argv 或环境转储**。
-- **`LocalDshBridge`**（`bridge.ts`）：本地 DSH adapter bridge——极简 MCP client（`initialize` 握手 `protocolVersion 2025-03-26` + `Mcp-Session-Id` 头管理，无 SDK 依赖），连本地 helm daemon 的 Streamable HTTP MCP 端点，带 Bearer token，与 ChatGPT 隧道访问方式完全一致。**绝不在网络上暴露 daemon 的 loopback unix socket adapter 协议**——这是硬边界：node agent 只通过 3457 `/mcp` 的认证 MCP 语义接入本地 DSH（决策 2/13）。
+- **`LocalHelmBackend`（默认 `McpLocalHelmBackend`）**（`bridge.ts`）：本地 DSH adapter bridge——极简 MCP client（`initialize` 握手 `protocolVersion 2025-03-26` + `Mcp-Session-Id` 头管理，无 SDK 依赖），连本地 helm daemon 的 Streamable HTTP MCP 端点，带 Bearer token，与 ChatGPT 隧道访问方式完全一致。**绝不在网络上暴露 daemon 的 loopback unix socket adapter 协议**——这是硬边界：node agent 只通过 3457 `/mcp` 的认证 MCP 语义接入本地 DSH（决策 2/13）。
 - **`HelmNodeAgent`**（`agent.ts`）：节点主进程。状态机 `idle/connecting/connected/reconnecting/stopped`：
   1. **出站拨号** hub（wss 生产 / ws 仅 loopback、test）；
   2. **HMAC 握手**（客户端状态机）；
@@ -134,7 +134,7 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
   4. 服务 hub 发起的 RPC：`health`/`listWorkspaces`/`listSessions`/`createSession`/`getSession`/`resumeSession`/`prompt`/`cancel`/`mcp.call`（通用透传：hub 路由任何 MCP 工具到这里）；
   5. **reconnect**：指数退避（1s 起 ×2，上限 30s）+ jitter（0–500ms），**重连成功后全量 re-register + metadata reconcile（无部分状态）**，退避在成功连接时重置（决策 5）；
   6. `probeLocal()`：每 10s 经 bridge 调 `supervisor_health` 探活，产出分层 health（channel/adapter/datapath/serena/tunnel）。
-- **数据流**：`ChatGPT → Hub MCP(3471) → Router → forward(mcp.call) → Node Agent → LocalDshBridge → daemon MCP(3457) → DSH`；反向：`daemon 状态 → bridge 探测/采集 → heartbeat/reconcile → Hub`。
+- **数据流**：`ChatGPT → Hub MCP(3471) → Router → forward(mcp.call) → Node Agent → LocalHelmBackend(McpLocalHelmBackend) → daemon MCP(3457) → DSH`；反向：`daemon 状态 → bridge 探测/采集 → heartbeat/reconcile → Hub`。
 
 ### 3.5 `@dsh-helm/presence` —— presence providers
 
