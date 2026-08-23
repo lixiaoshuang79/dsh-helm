@@ -273,12 +273,11 @@ presence 影响**未显式指定目标**的调用路由（第 4 优先级）。�
 ## 8. 多节点日常使用（ChatGPT 侧）
 
 - **指定目标**：任何可路由工具都带可选 `target_node` 参数（`node_id` 见 `nodes_list`）——显式目标优先级第一，破坏性操作（`sessions_prompt`/`sessions_resume`）拿不准时**务必带上**。
-- **会话归属**：会话有强亲和（session owner），**不静默迁移**——会话永远回到 owner 节点执行；global key 是 `node_id:native_session_id`，裸 native id 跨节点歧义时 hub 返回 undefined 而非猜测。
+- **会话归属**：会话有强亲和（session owner），**不静默迁移**——会话永远回到 owner 节点执行；global key 是 `node_id:native_session_id`，裸 native id 跨节点歧义时 hub 返回 undefined 而非猜测。跨节点搬会话 v1 不支持（`handoff` 诚实返回 unsupported）。
 - **工作区归属**：`code_*` 工具按 workspace owner 路由（`workspace` 参数传 native id 或 path；hub 不实现代码智能，只代理到 owner 节点）。
 - **排查路由**：`route_explain`（`op` 必填，可带 `session_id`/`workspace`/`target_node`）只解释不执行，返回决策、evidence、candidates——多节点场景的第一排查工具。
 - **手动 pin**：想让后续未指定调用都落到某台机器：`presence_claim`（`node_id` 必填，默认 10min pinned）；用完 `presence_release`。
 - **聚合视图**：`projects_list` / `workspaces_list` / `sessions_list`（可 `node_id` 过滤）/ `agents_list` 返回多节点扁平结果，每条带 `node_id`。
-- **跨节点搬会话**：v1 不支持（`handoff` 诚实返回 unsupported，无无损迁移）。
 
 ## 9. 安全注意（读威胁模型后再操作）
 
@@ -286,8 +285,7 @@ presence 影响**未显式指定目标**的调用路由（第 4 优先级）。�
 2. **防火墙**：agent 只需**出站**（拨号 hub 3470）；hub 机器按 §1 方式开放入站（SSH 隧道只开 22；WSS 反代只开 443）；**不要把 3470/3471 直接暴露公网**（mesh 默认 ws 明文、MCP 无鉴权）。
 3. **凭据落盘**：`node.json`、`~/.agent-chatgpt-helm/token`、`~/.dsh/.credentials.yaml` 全部 0600，且不在 git 里（`.gitignore` 已排除 `*.sqlite3` 与凭据）；不要把它们同步进云盘。
 4. **怀疑泄露**：`dsh-helm rotate-token` 换新 token，同时更新 hub 侧 `DSH_HELM_TOKEN`；daemon token 泄露则删 `~/.agent-chatgpt-helm/token` 让 daemon 重建。
-5. **DSH web（3080）无认证**：它只绑 loopback + trustedHosts 围栏——不要在公网反代 3080；本机浏览器/恶意扩展仍能碰它（威胁模型 T12）。
-6. **本地代理**：若新机器还要跑 ChatGPT 隧道（单机兼容模式），`tunnel-client` 必须带 `HTTPS_PROXY=http://127.0.0.1:7897`，凭据从 `~/.dsh/.credentials.yaml` 以 `env:` 语法注入。
+5. **DSH web（3080）无认证**：只绑 loopback + trustedHosts 围栏——不要在公网反代 3080；本机浏览器/恶意扩展仍能碰它（威胁模型 T12）。本地代理同理：若新机器还要跑 ChatGPT 隧道，`tunnel-client` 必须带 `HTTPS_PROXY=http://127.0.0.1:7897`，凭据从 `~/.dsh/.credentials.yaml` 以 `env:` 语法注入。
 
 ## 10. 常见问题排查表
 

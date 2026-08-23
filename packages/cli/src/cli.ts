@@ -20,6 +20,7 @@
  */
 
 import { loadConfig } from '@dsh-helm/node-agent'
+import { spawnSync } from 'node:child_process'
 
 export type CliCommand =
   | 'init'
@@ -136,4 +137,62 @@ export function handoffV1(sessionId: string, toNode: string): { supported: false
     session_id: sessionId,
     to_node: toNode,
   }
+}
+
+/** Main dispatch: dsh-helm <command>. (Agent/hub commands are thin executors
+ *  that shell out to the runtimes via their package bins.) */
+export function main(argv: string[]): number {
+  const parsed = parseArgs(argv)
+  switch (parsed.command) {
+    case 'help':
+      console.log(HELP_TEXT)
+      return 0
+    case 'init': {
+      const cfg = loadConfig()
+      console.log(`node identity ready: ${cfg.node_id}`)
+      console.log(`config: ~/.dsh/helm/node.json (0600)`)
+      console.log(`hub_url: ${cfg.hub_url || '(set via --hub / DSH_HELM_HUB at agent start)'}`)
+      return 0
+    }
+    case 'status':
+      console.log(defaultOutput())
+      return 0
+    case 'handoff': {
+      const [sessionId, toNode] = parsed.args
+      if (!sessionId || !toNode) {
+        console.error('usage: dsh-helm handoff <session_id> <to_node>')
+        return 1
+      }
+      const r = handoffV1(sessionId, toNode)
+      console.log(JSON.stringify(r, null, 2))
+      return r.supported ? 0 : 1
+    }
+    case 'agent':
+      // delegate to the node-agent package bin
+      return execBin('dsh-helm-agent', parsed.args)
+    case 'hub':
+      return execBin('dsh-helm-hub', parsed.args)
+    case 'nodes':
+    case 'node':
+    case 'route-explain':
+    case 'presence':
+    case 'target':
+    case 'rotate-token':
+    case 'verify':
+      console.error(`command '${parsed.command}' requires a live hub connection (RPC) — available in the next milestone; run 'dsh-helm hub' first.`)
+      return 1
+    default:
+      console.log(HELP_TEXT)
+      return 0
+  }
+}
+
+function execBin(name: string, args: string[]): number {
+  const res = spawnSync(name, args, { stdio: 'inherit', shell: true })
+  return res.status ?? 1
+}
+
+const isMain = process.argv[1] && (process.argv[1].endsWith('cli.js') || process.argv[1].endsWith('dsh-helm'))
+if (isMain) {
+  process.exit(main(process.argv.slice(2)))
 }
