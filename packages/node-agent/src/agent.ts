@@ -84,6 +84,14 @@ export class HelmNodeAgent {
     return this.state
   }
 
+  /** Forward a presence claim to the hub (from providers/listener). */
+  reportPresence(claim: PresenceClaim): void {
+    if (!this.peer) return
+    void this.peer.request(HUB_METHODS.PRESENCE_REPORT, { node_id: this.cfg.node_id, claim }).catch(() => {
+      /* transient; next report retries */
+    })
+  }
+
   start(): void {
     this.stopped = false
     void this.connect()

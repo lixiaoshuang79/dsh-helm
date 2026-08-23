@@ -25,9 +25,9 @@ set -eu
 set -o pipefail 2>/dev/null || true
 
 HOME_DIR="$HOME"
-MCP_BASE="http://127.0.0.1:3471"
+MCP_BASE="${DSH_HUB_BASE:-http://127.0.0.1:3471}"
 MCP_URL="$MCP_BASE/mcp"
-STORE_FILE="$HOME_DIR/.dsh/helm/store.sqlite3"
+STORE_FILE="${DSH_STORE_FILE:-$HOME_DIR/.dsh/helm/store.sqlite3}"
 
 JSON=0
 FORCE_STORE=0
@@ -67,7 +67,8 @@ if [ "$FORCE_STORE" = "0" ]; then
       -H 'Accept: application/json' \
       -H "Mcp-Session-Id: $SID" \
       -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"supervisor_health","arguments":{}}}' 2>/dev/null || true)"
-    if printf '%s' "$HEALTH_BODY" | grep -q '"nodes"'; then
+    # 响应里 text 字段内的 JSON 是转义形式（\"nodes\"），匹配裸 key 即可
+    if printf '%s' "$HEALTH_BODY" | grep -q 'nodes'; then
       if [ "$JSON" = "1" ]; then
         printf '%s\n' "$HEALTH_BODY"
         exit 0

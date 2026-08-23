@@ -47,6 +47,9 @@ importers:
 
   packages/node-agent:
     dependencies:
+      '@dsh-helm/presence':
+        specifier: workspace:*
+        version: link:../presence
       '@dsh-helm/protocol':
         specifier: workspace:*
         version: link:../protocol
