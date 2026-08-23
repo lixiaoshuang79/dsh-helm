@@ -17,6 +17,8 @@ import { DEFAULT_HUB_MESH_PORT } from '@dsh-helm/protocol'
 export interface MeshServerOptions {
   cp: ControlPlane
   port?: number
+  /** Bind host (default: all interfaces; loopback for dev). */
+  host?: string
   /** Optional pre-existing http server (for TLS / reverse-proxy setups). */
   server?: Server
   /** Path prefix to filter (default '/'). */
@@ -34,7 +36,7 @@ export class MeshServer {
     this.logFn = opts.log
     this.cp = opts.cp
     this.port = opts.port ?? DEFAULT_HUB_MESH_PORT
-    this.wss = new WebSocketServer({ port: opts.server ? undefined : this.port, server: opts.server, path: opts.path ?? '/' })
+    this.wss = new WebSocketServer({ port: opts.server ? undefined : this.port, host: opts.host, server: opts.server, path: opts.path ?? '/' })
     this.wss.on('connection', (socket, req) => this.onSocket(socket, req))
   }
 

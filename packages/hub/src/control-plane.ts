@@ -94,6 +94,13 @@ export class ControlPlane {
     return this.opts.hubId
   }
 
+  /** Shut the control plane down: close all live node connections. */
+  stop(): void {
+    for (const nodeId of [...this.opts.connections.keys()]) {
+      this.opts.connections.get(nodeId)?.close()
+    }
+  }
+
   /** Presence registry (exposed for control-plane tools). */
   presenceRegistry(): PresenceRegistry {
     return this.opts.presence

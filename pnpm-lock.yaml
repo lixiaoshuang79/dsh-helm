@@ -23,27 +23,15 @@ importers:
 
   packages/cli:
     dependencies:
-      '@dsh-helm/hub':
-        specifier: workspace:*
-        version: link:../hub
       '@dsh-helm/node-agent':
         specifier: workspace:*
         version: link:../node-agent
-      '@dsh-helm/platform':
-        specifier: workspace:*
-        version: link:../platform
-      '@dsh-helm/presence':
-        specifier: workspace:*
-        version: link:../presence
-      '@dsh-helm/protocol':
-        specifier: workspace:*
-        version: link:../protocol
-      '@dsh-helm/store':
-        specifier: workspace:*
-        version: link:../store
 
   packages/hub:
     dependencies:
+      '@dsh-helm/platform':
+        specifier: workspace:*
+        version: link:../platform
       '@dsh-helm/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -59,9 +47,6 @@ importers:
 
   packages/node-agent:
     dependencies:
-      '@dsh-helm/presence':
-        specifier: workspace:*
-        version: link:../presence
       '@dsh-helm/protocol':
         specifier: workspace:*
         version: link:../protocol

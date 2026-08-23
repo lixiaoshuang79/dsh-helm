@@ -2,7 +2,7 @@
   "name": "@dsh-helm/cli",
   "version": "0.1.0",
   "type": "module",
-  "description": "dsh-helm CLI: join/status/nodes/node/route-explain/presence/target/rotate-token/handoff",
+  "description": "dsh-helm CLI: init/agent/hub/status/nodes/route-explain/presence/rotate-token/handoff",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "bin": {
@@ -19,11 +19,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dsh-helm/protocol": "workspace:*",
-    "@dsh-helm/store": "workspace:*",
-    "@dsh-helm/hub": "workspace:*",
-    "@dsh-helm/node-agent": "workspace:*",
-    "@dsh-helm/presence": "workspace:*",
-    "@dsh-helm/platform": "workspace:*"
+    "@dsh-helm/node-agent": "workspace:*"
   }
 }

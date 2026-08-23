@@ -2,7 +2,7 @@
   "name": "@dsh-helm/platform",
   "version": "0.1.0",
   "type": "module",
-  "description": "Cross-platform adapters: paths, service management (launchd/systemd/Windows), process helpers",
+  "description": "Cross-platform adapters: paths, service templates (launchd/systemd/Windows Task), process helpers",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "exports": {
