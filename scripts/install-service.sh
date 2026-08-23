@@ -3,8 +3,8 @@
 #
 # 用途：
 #   生成 ~/Library/LaunchAgents/com.dsh-helm.node-agent.plist（模板思路与
-#   packages/platform 的 launchdPlist 一致：ProgramArguments = [node, cli.js,
-#   agent]，RunAtLoad + KeepAlive，日志到 ~/.dsh/helm/logs/），随后
+#   packages/platform 的 launchdPlist 一致：ProgramArguments = [node,
+#   agent-cli.js]，RunAtLoad + KeepAlive，日志到 ~/.dsh/helm/logs/），随后
 #   launchctl bootstrap 并验证。
 #
 # 用法：
@@ -33,7 +33,7 @@ HELM_CONFIG_DIR="$HOME_DIR/.dsh/helm"
 LOG_DIR="$HELM_CONFIG_DIR/logs"
 NODE_CONFIG="$HELM_CONFIG_DIR/node.json"
 NODE_BIN="${DSH_NODE_BIN:-$(command -v node || true)}"
-CLI_JS="$REPO_DIR/packages/cli/lib/cli.js"
+AGENT_JS="$REPO_DIR/packages/node-agent/lib/agent-cli.js"
 
 STOP=0
 for a in "$@"; do
@@ -76,8 +76,8 @@ fi
 [ -n "$NODE_BIN" ] || die "未找到 node（which node 为空）"
 [ -x "$NODE_BIN" ] || die "node 不可执行: $NODE_BIN"
 ok "node: $NODE_BIN ($("$NODE_BIN" --version))"
-[ -f "$CLI_JS" ] || die "CLI 未构建: $CLI_JS（先运行 ./scripts/install.sh）"
-ok "CLI: $CLI_JS"
+[ -f "$AGENT_JS" ] || die "agent 未构建: $AGENT_JS（先运行 ./scripts/install.sh）"
+ok "agent: $AGENT_JS"
 
 if [ -f "$NODE_CONFIG" ]; then
   ok "node.json 存在"
@@ -101,8 +101,7 @@ cat > "$PLIST_PATH" <<PLISTEOF
   <key>ProgramArguments</key>
   <array>
     <string>${NODE_BIN}</string>
-    <string>${CLI_JS}</string>
-    <string>agent</string>
+    <string>${AGENT_JS}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -147,8 +146,8 @@ if launchctl print "gui/$(id -u)/$LABEL" >/dev/null 2>&1; then
 else
   warn "launchctl print 未找到 $LABEL（可能启动即退出，看 $LOG_DIR/agent.err.log）"
 fi
-if pgrep -f "cli\.js agent" >/dev/null 2>&1; then
-  ok "agent 进程运行中（pgrep 'cli.js agent'）"
+if pgrep -f "agent-cli\.js" >/dev/null 2>&1 || pgrep -f "[d]sh-helm-agent" >/dev/null 2>&1; then
+  ok "agent 进程运行中（pgrep 'agent-cli.js'）"
 else
   warn "未检测到 agent 进程——检查 $LOG_DIR/agent.err.log（常见原因：hub_url 未配置）"
 fi

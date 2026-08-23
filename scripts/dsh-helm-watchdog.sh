@@ -6,7 +6,7 @@
 #
 # 职责：
 #   每 15s：
-#     1. 检查 node agent 进程（锚定 pgrep 'cli.js agent' / 'dsh-helm agent'）
+#     1. 检查 node agent 进程（锚定 pgrep 'agent-cli.js' / 'dsh-helm-agent'）
 #     2. 探测本地 daemon MCP（127.0.0.1:3457/healthz）
 #   自愈（确定性顺序）：
 #     - agent 挂 & daemon 活  → 拉起 agent（nohup 脱离会话）
@@ -35,7 +35,7 @@ LOG_FILE="$LOG_DIR/watchdog.log"
 PID_FILE="$LOG_DIR/watchdog.pid"
 NODE_CONFIG="$HELM_CONFIG_DIR/node.json"
 NODE_BIN="$(command -v node || true)"
-CLI_JS="$REPO_DIR/packages/cli/lib/cli.js"
+AGENT_JS="$REPO_DIR/packages/node-agent/lib/agent-cli.js"
 DAEMON_URL="http://127.0.0.1:3457/healthz"
 CHECK_INTERVAL=15
 
@@ -82,7 +82,7 @@ fi
 
 # ---------- 前置检查 ----------
 [ -n "$NODE_BIN" ] || { echo "[dsh-helm] ✗ 未找到 node" >&2; exit 2; }
-[ -f "$CLI_JS" ]   || { echo "[dsh-helm] ✗ CLI 未构建: $CLI_JS（先运行 ./scripts/install.sh）" >&2; exit 2; }
+[ -f "$AGENT_JS" ] || { echo "[dsh-helm] ✗ agent 未构建: $AGENT_JS（先运行 ./scripts/install.sh）" >&2; exit 2; }
 [ -f "$NODE_CONFIG" ] || { echo "[dsh-helm] ✗ node.json 不存在（先运行: dsh-helm init）" >&2; exit 2; }
 
 # ---------- 单实例锁（pid 文件 + 存活校验） ----------
@@ -118,13 +118,13 @@ daemon_alive() {
 
 # node agent 是否在跑（锚定 pgrep，防误匹配其他进程）
 agent_alive() {
-  pgrep -f "cli\.js agent" >/dev/null 2>&1 || pgrep -f "[d]sh-helm agent" >/dev/null 2>&1
+  pgrep -f "agent-cli\.js" >/dev/null 2>&1 || pgrep -f "[d]sh-helm-agent" >/dev/null 2>&1
 }
 
-# 拉起 agent（nohup 脱离会话，直接 node 启动，cmdline 固定为 "node cli.js agent"，
-# 与 launchd plist 的 ProgramArguments 一致，锚定 pgrep 可识别；绝不在前台阻塞）
+# 拉起 agent（nohup 脱离会话，直接 node 启动 agent-cli.js，cmdline 与
+# launchd plist 的 ProgramArguments 一致，锚定 pgrep 可识别；绝不在前台阻塞）
 start_agent() {
-  nohup "$NODE_BIN" "$CLI_JS" agent >> "$LOG_DIR/agent.log" 2>&1 &
+  nohup "$NODE_BIN" "$AGENT_JS" >> "$LOG_DIR/agent.log" 2>&1 &
   log "已拉起 agent（pid $!）"
 }
 

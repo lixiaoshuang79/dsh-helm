@@ -126,7 +126,7 @@ dsh-helm-agent --hub ws://127.0.0.1:3470
 #   local probe ok (serena connected)
 ```
 
-前台跑通（日志无 `handshake failed` / `local probe failed`）后再做自启。Ctrl-C 停止（SIGINT/SIGTERM 走优雅关闭）。
+前台跑通（日志无 `handshake failed` / `local probe failed`）后再做自启；Ctrl-C 优雅停止。新节点上 `dsh-helm status` 可随时查看本地配置。
 
 ### 5.2 macOS：launchd（模板在 `@dsh-helm/platform` 的 `launchdPlist`：RunAtLoad + KeepAlive）
 
@@ -221,7 +221,7 @@ systemctl --user status dsh-helm-node-agent
 
 ## 6. 验证
 
-新节点上线后，在**入口机器**（或任一能访问 hub MCP 3471 的机器）验证：
+新节点上线后，在**入口机器**（或任一能访问 hub MCP 3471 的机器）验证（也可以只用 CLI：`dsh-helm nodes list` / `node get` / `route-explain`）：
 
 ```bash
 # 1. hub 健康（control 层）
@@ -238,11 +238,8 @@ curl -s -X POST http://127.0.0.1:3471/mcp -H 'content-type: application/json' -d
   "jsonrpc":"2.0","id":2,"method":"tools/call",
   "params":{"name":"supervisor_health","arguments":{}}}'
 # 期望（分层健康，绝不折叠成单一 status）：
-#   control : ok                      （hub 进程 + store）
-#   channel : ok                      （新节点 WS 连接 + lease 新鲜度，45s）
-#   adapter : ok                      （新节点本地 helm daemon 可达）
-#   datapath: ok                      （sessions_list 端到端可用）
-#   serena  : connected / ok          （workspace 运行时）
+#   control: ok（hub 进程+store）│ channel: ok（WS+lease，45s）│ adapter: ok（本地 daemon 可达）
+#   datapath: ok（sessions_list 端到端）│ serena: connected/ok（workspace 运行时）
 
 # 4. 聚合列表：新节点的会话/工作区出现（global key = node_id:native_id）
 curl -s -X POST http://127.0.0.1:3471/mcp -H 'content-type: application/json' -d '{

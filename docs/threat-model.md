@@ -49,7 +49,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 ### 2.4 存储与日志（事实）
 
 - SQLite（`node:sqlite DatabaseSync`，WAL + `busy_timeout` + `synchronous=NORMAL` + `foreign_keys=ON`，`schema_version` 迁移，新库版本高于支持版本直接拒绝）：`~/.dsh/helm/store.sqlite3`。7 张表全部是元数据——nodes / presence_leases / sessions / workspaces / audit / route_log / kv；**任何表都不存 DSH 会话正文**（`db.ts`、`types.ts` 设计规则，wire 也只承载元数据）。
-- audit 表列：`ts/call_id/op/actor_node/target_node/session_id/decision/danger/explicit/result`（`store/src/audit.ts` `AuditLog` DAO；`append` 只 INSERT）；route_log 存完整 `RouteDecision` JSON（reason/evidence/candidates，无 args 无 prompt）。**现状**：DAO 与表已就绪，但 v1 的 `ControlPlane.auditRoute` 目前只走 `log()` 回调（内存环/结构化日志），持久化落库待补齐（架构文档 §9）。
+- audit 表列：`ts/call_id/op/actor_node/target_node/session_id/decision/danger/explicit/result`（`store/src/audit.ts` `AuditLog` DAO：`append` 先插 `result='pending'`，`auditResult` 按 `call_id` 用 `updateResult` 回填结果）；route_log 存完整 `RouteDecision` JSON（reason/evidence/candidates，无 args 无 prompt）。**接入现状**：`ControlPlane.auditRoute`/`auditResult` 已把每次路由决策写入 `logRoute` + `append`（v0.1.0 起），`call_id` 贯穿审计/路由/应用日志。
 - redactor：upstream core 的 `redactText(text, secrets)`（长度≥4 的 secret 替换为 `[REDACTED]`）用于隧道 stdout/stderr 转发；隧道凭据经 `env:` 间接语法注入（`--control-plane.api-key env:CONTROL_PLANE_API_KEY`、`--mcp.extra-headers "Authorization: env:AGENT_CHATGPT_HELM_AUTH"`），**token 不出现在 argv/ps**；node token 从 0600 文件读取，"never from argv or environment dumps"（`node-agent/src/config.ts`）。
 
 ### 2.5 本地 daemon 边界（事实）
@@ -148,8 +148,8 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 - **威胁描述**：运维/攻击者（持本机权限）篡改或删除 audit / route_log 记录，抹掉恶意操作痕迹。
 - **攻击场景**：攻击者利用 T5 的节点攻陷或本机权限，直接编辑 `~/.dsh/helm/store.sqlite3` 的 audit/route_log 表（`sqlite3` 命令行即可），或删除 WAL/主库文件，让事后排查查不到某次 `sessions_prompt` 的转发记录。
 - **影响**：失去取证能力；route_log 的 `route_explain` 溯源失效；合规/审计要求不满足。
-- **缓解**：`AuditLog` DAO 只有 `append`（INSERT）+ 查询，**没有 UPDATE/DELETE 接口**（`store/src/audit.ts`）；表结构带 `call_id` 可跨日志关联（审计/路由/应用日志同 id）；route_log 存完整 `RouteDecision` JSON（reason/evidence/candidates）；hub 侧每次路由还有结构化日志行（`route <callId> <op> -> <node>` / `route-result ...`），与 SQLite 互为印证。
-- **残余风险**：**现状缺口**——v1 的 `ControlPlane.auditRoute` 只走 `log()` 回调，`AuditLog.append`/`logRoute` 尚未接入控制平面执行路径（架构文档 §9 明示"完整落库与查询面待补齐"）；SQLite 文件是本地普通文件（默认权限由 umask 决定），持 OS 用户权限即可直接改库/删库/清 WAL；**无哈希链/无远程副本/无防篡改设计**；日志落盘前的内容依赖代码路径不依赖存储，但落盘后的完整性没有机制保证。
+- **缓解**：审计已落库——`ControlPlane.auditRoute` 每次路由决策写 `route_log`（完整 `RouteDecision` JSON：reason/evidence/candidates，无 args 无 prompt）+ `audit.append`（`result='pending'`），调用完成后 `auditResult` 按 `call_id` 用 `updateResult` 回填结果（`store/src/audit.ts`）；`call_id` 贯穿审计/路由/应用日志，可跨日志关联；表结构无删除接口、`updateResult` 只回填 result 列；hub 侧还有结构化日志行（`route <callId> <op> -> <node>` / `route-result`）与 SQLite 互为印证。
+- **残余风险**：`updateResult` 是 UPDATE 路径（按 `call_id` 仅改 `result` 列，不覆盖其余列）；SQLite 文件是本地普通文件（默认权限由 umask 决定），持 OS 用户权限仍可直接改库/删库/清 WAL（`updateResult` 只防应用层误改，不防持文件权限者）；**无哈希链/无远程副本/无防篡改设计**；日志落盘前的内容依赖代码路径，落盘后的完整性没有机制保证。
 
 ### T9 SQLite 存储攻击（本地篡改、损坏）
 

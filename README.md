@@ -58,13 +58,15 @@ dsh-helm/
 │   │                         #   WS mesh 服务器（3470）、MCP 服务器（3471）、
 │   │                         #   hub-cli 入口
 │   ├── node-agent/           # 节点代理：出站 WS 连接、心跳/重连/认证、
-│   │                         #   本地 DSH 桥（MCP client → 3457）、元数据对账
+│   │                         #   本地 DSH 桥（MCP client → 3457）、元数据对账；
+│   │                         #   bin: dsh-helm-agent（agent-cli.js）
 │   ├── platform/             # 跨平台适配：配置路径、launchd/systemd/Windows
 │   │                         #   Task 服务模板、默认端口
 │   ├── presence/             # presence 提供方：手动声明、macOS desktop
 │   │                         #   sidecar、Windows/浏览器脚手架
 │   └── cli/                  # dsh-helm CLI：init/agent/hub/status/nodes/
-│                             #   route-explain/presence/rotate-token/handoff
+│                             #   route-explain/presence/rotate-token/handoff；
+│                             #   bin: dsh-helm（agent/hub 委派给对应 bin）
 └── scripts/                  # ops 脚本（bash，macOS 优先，见下）
 ```
 
@@ -85,8 +87,8 @@ dsh-helm init
 dsh-helm hub
 
 # 5. 节点机：启动 agent（前台；或安装为 launchd 服务）
-dsh-helm agent                      # 前台
-./scripts/install-service.sh        # 后台 launchd 服务（macOS）
+dsh-helm agent                     # 前台（委派 dsh-helm-agent）
+./scripts/install-service.sh       # 后台 launchd 服务（macOS）
 
 # 6. 自检
 ./scripts/verify.sh                 # 0 全绿 / 1 警告 / 2 严重
@@ -110,9 +112,9 @@ pnpm clean          # 清理 lib/
 
 ## 测试
 
-当前 **134 个测试用例**：
+当前 **156 个测试用例**（22 个测试文件，vitest run 实测）：
 
-- **单元 121**：协议（HMAC 握手/信封/JSON-RPC）、store（db/注册表/presence/目录）、hub（路由矩阵/校验矩阵/MCP server）、node-agent（桥）、platform、presence、CLI。
+- **单元 143**：协议（HMAC 握手/信封/JSON-RPC）、store（db/注册表/presence/目录）、hub（路由矩阵/校验矩阵/MCP server/hub-cli/审计持久化/单节点兼容）、node-agent（桥/config/agent-cli/reconnect）、platform、presence、CLI。
 - **集成 13**：其中 **9 个双 fake node 全协议端到端**（`tests/integration/two-fake-nodes.test.ts`，内存握手→注册→心跳→对账→presence→路由转发，无真实 socket），另有 node-agent 桥集成 4 个。
 
 ```bash
@@ -145,17 +147,17 @@ pnpm test:integration           # 仅 tests/integration/
 
 ## 状态
 
-**v0.1.0 开发中**。当前验证边界：单元 + 集成测试（含双 fake node 全协议内存端到端）全绿；**真实双机冒烟（两台物理机 WSS + 真实 DSH）待做**，hub-cli 的 launchd/systemd 生产化包装、密钥管理与 WSS 代理模板是下一步。
+**v0.1.0 开发中**。当前验证边界：单元 + 集成测试（含双 fake node 全协议内存端到端）全绿；CLI 的 RPC 类命令（`nodes`/`node`/`route-explain`/`presence`/`rotate-token`）依赖 live hub 连接，属于下一里程碑。**真实双机冒烟（两台物理机 WSS + 真实 DSH）待做**，hub-cli 的 launchd/systemd 生产化包装、密钥管理与 WSS 代理模板是下一步。
 
 ## ops 脚本
 
 | 脚本 | 作用 |
 |---|---|
-| `scripts/install.sh` | 安装 CLI（node 检查 / pnpm build / wrapper / 配置提示），幂等 |
+| `scripts/install.sh` | 安装 CLI（node 检查 / pnpm build / 三个 wrapper：dsh-helm、dsh-helm-agent、dsh-helm-hub / 配置提示），幂等 |
 | `scripts/uninstall.sh` | 卸载（停 launchd 服务 / 删 wrapper / 问询删配置，默认保留），`--purge` 全删 |
 | `scripts/verify.sh` | 自检（node ≥22.5 / wrapper / node.json 0600 / 3457 可达 / hub 端口），退出码 0/1/2 |
 | `scripts/health.sh` | 节点状态表（hub MCP 优先，本地 store 退化） |
-| `scripts/install-service.sh` | 装 node agent 为 launchd 服务（macOS），`--stop` 卸载 |
+| `scripts/install-service.sh` | 装 node agent 为 launchd 服务（macOS，直接跑 agent-cli.js），`--stop` 卸载 |
 | `scripts/dsh-helm-watchdog.sh` | 15s 自愈 watchdog（进程级拉起，单实例锁；datapath 探测属 TS 层，不越权） |
 
 所有脚本：bash 3.2 兼容（`set -eu`，pipefail 有则用）、`[dsh-helm]` 输出前缀、幂等、只探测不修改生产端口（3080/3457/3458）上的现有服务。

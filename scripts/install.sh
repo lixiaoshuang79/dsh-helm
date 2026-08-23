@@ -3,8 +3,12 @@
 #
 # 用途：
 #   1. 解析 node 路径（which node），校验版本 >= 22.5
-#   2. pnpm install + build（或复用已编译产物 packages/cli/lib/cli.js）
-#   3. 写 ~/.local/bin/dsh-helm 可执行 wrapper（exec node lib/cli.js "$@"）
+#   2. pnpm install + build（或复用已编译产物 packages/*/lib/*.js）
+#   3. 写 ~/.local/bin 下三个可执行 wrapper：
+#        dsh-helm        → node packages/cli/lib/cli.js（主入口，命令分发）
+#        dsh-helm-agent  → node packages/node-agent/lib/agent-cli.js（agent 运行入口）
+#        dsh-helm-hub    → node packages/hub/lib/hub-cli.js（hub 运行入口）
+#      （dsh-helm agent/hub 命令经 spawnSync 委派给后两个 bin，必须在 PATH）
 #   4. 检查 ~/.dsh/helm/node.json 是否存在，否则提示先运行 dsh-helm init
 #   5. 输出安装摘要
 #
@@ -18,7 +22,6 @@
 # 退出码：
 #   0  安装完成（全绿）
 #   1  依赖/构建失败（node 缺失、node 版本过低、构建失败）
-#   2  用法错误或不可执行条件（非 macOS 且无 node 时）
 #
 # 幂等：重复运行安全；已安装项跳过，wrapper 每次重新生成（内容不变）。
 # 安全：只写 wrapper 与构建产物；不触碰生产端口（3080/3457/3458）与
@@ -34,7 +37,10 @@ HOME_DIR="$HOME"
 WRAPPER_DIR="${DSH_WRAPPER_DIR:-$HOME_DIR/.local/bin}"
 HELM_CONFIG_DIR="$HOME_DIR/.dsh/helm"
 NODE_CONFIG="$HELM_CONFIG_DIR/node.json"
+# 三个入口（与各包 package.json 的 bin 声明一致）
 CLI_JS="$REPO_DIR/packages/cli/lib/cli.js"
+AGENT_JS="$REPO_DIR/packages/node-agent/lib/agent-cli.js"
+HUB_JS="$REPO_DIR/packages/hub/lib/hub-cli.js"
 
 # ---- 输出助手（统一 [dsh-helm] 前缀） ----
 say()   { echo "  $*"; }
@@ -44,7 +50,7 @@ die()   { echo "  ✗ $*"; exit 1; }
 
 echo "[dsh-helm] ==== dsh-helm CLI 安装 ===="
 echo "[dsh-helm] 仓库:   $REPO_DIR"
-echo "[dsh-helm] wrapper: $WRAPPER_DIR/dsh-helm"
+echo "[dsh-helm] wrapper: $WRAPPER_DIR/{dsh-helm,dsh-helm-agent,dsh-helm-hub}"
 echo ""
 
 # ---------- 1. node 检查 ----------
@@ -75,14 +81,18 @@ fi
 # ---------- 2. 构建 ----------
 echo ""
 echo "[dsh-helm] --- 2/4 构建 ---"
-if [ -f "$CLI_JS" ]; then
-  ok "已编译产物存在: $CLI_JS（跳过构建）"
+if [ -f "$CLI_JS" ] && [ -f "$AGENT_JS" ] && [ -f "$HUB_JS" ]; then
+  ok "已编译产物存在（cli/agent/hub），跳过构建"
 elif [ "${DSH_SKIP_BUILD:-0}" = "1" ]; then
-  die "DSH_SKIP_BUILD=1 但 $CLI_JS 不存在。请先运行 pnpm install && pnpm build"
+  MISSING_LIST=""
+  [ -f "$CLI_JS" ]  || MISSING_LIST="$MISSING_LIST cli"
+  [ -f "$AGENT_JS" ] || MISSING_LIST="$MISSING_LIST agent"
+  [ -f "$HUB_JS" ]  || MISSING_LIST="$MISSING_LIST hub"
+  die "DSH_SKIP_BUILD=1 但产物缺失:${MISSING_LIST:- 无}。请先运行 pnpm install && pnpm build"
 else
   PNPM_BIN="${DSH_PNPM_BIN:-$(command -v pnpm || true)}"
   if [ -z "$PNPM_BIN" ]; then
-    die "未找到 pnpm，且 $CLI_JS 不存在。请先安装 pnpm（npm i -g pnpm）并运行: (cd $REPO_DIR && pnpm install && pnpm build)"
+    die "未找到 pnpm，且产物缺失。请先安装 pnpm（npm i -g pnpm）并运行: (cd $REPO_DIR && pnpm install && pnpm build)"
   fi
   ok "pnpm: $PNPM_BIN"
   if [ ! -d "$REPO_DIR/node_modules" ]; then
@@ -99,23 +109,29 @@ else
     cd "$REPO_DIR"
     "$PNPM_BIN" build
   ) || die "pnpm build 失败"
-  [ -f "$CLI_JS" ] || die "构建完成但 $CLI_JS 不存在，请检查 packages/cli"
-  ok "构建完成: $CLI_JS"
+  [ -f "$CLI_JS" ] && [ -f "$AGENT_JS" ] && [ -f "$HUB_JS" ] \
+    || die "构建完成但产物缺失，请检查 packages/{cli,node-agent,hub}"
+  ok "构建完成"
 fi
 
 # ---------- 3. wrapper ----------
 echo ""
 echo "[dsh-helm] --- 3/4 wrapper 安装 ---"
 mkdir -p "$WRAPPER_DIR"
-WRAPPER_PATH="$WRAPPER_DIR/dsh-helm"
-# 幂等：每次覆盖写相同内容的 wrapper（内容由下列变量决定，重跑结果一致）
-cat > "$WRAPPER_PATH" <<WRAPEOF
+# 幂等：每次覆盖写相同内容（重跑结果一致）
+write_wrapper() {
+  local name="$1" js="$2"
+  cat > "$WRAPPER_DIR/$name" <<WRAPEOF
 #!/usr/bin/env bash
 # dsh-helm wrapper（由 scripts/install.sh 生成，请勿手改；重跑 install.sh 可恢复）
-exec "$NODE_BIN" "$CLI_JS" "\$@"
+exec "$NODE_BIN" "$js" "\$@"
 WRAPEOF
-chmod +x "$WRAPPER_PATH"
-ok "已写入 wrapper: $WRAPPER_PATH"
+  chmod +x "$WRAPPER_DIR/$name"
+  ok "已写入 wrapper: $WRAPPER_DIR/$name"
+}
+write_wrapper "dsh-helm"       "$CLI_JS"
+write_wrapper "dsh-helm-agent" "$AGENT_JS"
+write_wrapper "dsh-helm-hub"   "$HUB_JS"
 
 if ! echo ":$PATH:" | grep -q ":$WRAPPER_DIR:"; then
   warn "$WRAPPER_DIR 不在 PATH 中。可执行: export PATH=\"$WRAPPER_DIR:\$PATH\"（或写入 ~/.zshrc）"
@@ -132,20 +148,23 @@ if [ -f "$NODE_CONFIG" ]; then
   fi
 else
   warn "~/.dsh/helm/node.json 不存在——请先初始化节点身份:"
-  say "    $WRAPPER_PATH init"
+  say "    $WRAPPER_DIR/dsh-helm init"
   say "    （生成 node_id + token，写入 $NODE_CONFIG，权限 0600）"
   say "    然后编辑 $NODE_CONFIG 设置 hub_url（wss://hub.example.com/）"
 fi
 
 echo ""
 echo "[dsh-helm] ==== 安装摘要 ===="
-echo "[dsh-helm]   wrapper:   $WRAPPER_PATH"
+echo "[dsh-helm]   wrapper:   $WRAPPER_DIR/{dsh-helm,dsh-helm-agent,dsh-helm-hub}"
 echo "[dsh-helm]   CLI 源码:  $CLI_JS"
+echo "[dsh-helm]   agent:     $AGENT_JS"
+echo "[dsh-helm]   hub:       $HUB_JS"
 echo "[dsh-helm]   node:      $NODE_BIN ($("$NODE_BIN" --version))"
 echo "[dsh-helm]   配置:      $NODE_CONFIG"
 echo "[dsh-helm] 下一步："
-echo "[dsh-helm]   1. $WRAPPER_PATH init        （首次）生成节点身份"
+echo "[dsh-helm]   1. dsh-helm init                       （首次）生成节点身份"
 echo "[dsh-helm]   2. 编辑 $NODE_CONFIG 设置 hub_url"
-echo "[dsh-helm]   3. $WRAPPER_PATH agent       （前台运行节点代理；或 scripts/install-service.sh 装 launchd）"
-echo "[dsh-helm]   4. ./scripts/verify.sh       （自检）"
+echo "[dsh-helm]   3. hub 机: dsh-helm hub；节点机: dsh-helm agent（前台），"
+echo "[dsh-helm]      或 ./scripts/install-service.sh（装 launchd 服务）"
+echo "[dsh-helm]   4. ./scripts/verify.sh                  （自检）"
 echo "[dsh-helm] ==== 安装完成（幂等，可重复运行） ===="
