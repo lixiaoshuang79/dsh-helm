@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@dsh-helm/protocol": "workspace:*",
-    "@dsh-helm/presence": "workspace:*",
     "ws": "^8.18.0",
     "@modelcontextprotocol/sdk": "1.30.0"
   }

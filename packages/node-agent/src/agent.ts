@@ -1,0 +1,427 @@
+/**
+ * HelmNodeAgent: the node-side process.
+ *
+ * Responsibilities:
+ * - dial OUT to the hub (ws:// loopback/test, wss:// production),
+ * - HMAC handshake (client side),
+ * - after welcome: register node metadata, reconcile sessions/workspaces,
+ * - periodic heartbeat (with health report from the local bridge probe),
+ * - serve hub-initiated RPCs (health/listWorkspaces/.../mcp.call) mapped onto
+ *   the local DSH bridge,
+ * - reconnect with exponential backoff + jitter; full re-register + reconcile
+ *   after every reconnect (no partial state),
+ * - expose presence reports to the hub (delegated to presence providers).
+ */
+
+import type { WireMessage, NodeInfo, NodeStatus, HealthReport, SessionInfo, WorkspaceInfo, PresenceClaim } from '@dsh-helm/protocol'
+import { HandshakeClient, NODE_METHODS, HUB_METHODS, RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
+import { DEFAULT_HEARTBEAT_MS, DEFAULT_NODE_LEASE_MS, RECONNECT_BACKOFF_BASE_MS, RECONNECT_BACKOFF_MAX_MS } from '@dsh-helm/protocol'
+import { LocalDshBridge } from './bridge.js'
+import type { NodeAgentConfig } from './config.js'
+
+export interface NodeAgentOptions {
+  config: NodeAgentConfig
+  /** Bridge to the local helm daemon. */
+  bridge: LocalDshBridge
+  /** WebSocket factory (defaults to global WebSocket; injectable for tests). */
+  wsFactory?: (url: string) => WebSocketLike
+  /** Presence provider hook: returns the current claim or undefined. */
+  presenceProvider?: () => Promise<PresenceClaim | undefined>
+  log?: (line: string) => void
+  heartbeatMs?: number
+  leaseMs?: number
+}
+
+/** Minimal WebSocket surface used by the agent (compatible with undici/ws). */
+export interface WebSocketLike {
+  readyState: number
+  OPEN: number
+  send(data: string): void
+  close(): void
+  onopen: (() => void) | null
+  onmessage: ((ev: { data: unknown }) => void) | null
+  onclose: (() => void) | null
+  onerror: ((err: unknown) => void) | null
+}
+
+type AgentState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'stopped'
+
+export class HelmNodeAgent {
+  private cfg: NodeAgentConfig
+  private bridge: LocalDshBridge
+  private wsFactory: (url: string) => WebSocketLike
+  private presenceProvider?: () => Promise<PresenceClaim | undefined>
+  private logFn?: (line: string) => void
+  private heartbeatMs: number
+  private leaseMs: number
+  private state: AgentState = 'idle'
+  private socket?: WebSocketLike
+  private peer?: RpcPeer
+  private heartbeatTimer?: NodeJS.Timeout
+  private reconnectTimer?: NodeJS.Timeout
+  private stopped = false
+  private backoff = RECONNECT_BACKOFF_BASE_MS
+  private seq = 0
+  private health: HealthReport = {
+    channel: { status: 'unknown' },
+    adapter: { status: 'unknown' },
+    datapath: { status: 'unknown' },
+    serena: { status: 'unknown' },
+  }
+  private hubNodeId?: string
+
+  constructor(opts: NodeAgentOptions) {
+    this.cfg = opts.config
+    this.bridge = opts.bridge
+    this.wsFactory = opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike)
+    this.presenceProvider = opts.presenceProvider
+    this.logFn = opts.log
+    this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
+    this.leaseMs = opts.leaseMs ?? DEFAULT_NODE_LEASE_MS
+  }
+
+  get stateLabel(): AgentState {
+    return this.state
+  }
+
+  start(): void {
+    this.stopped = false
+    void this.connect()
+  }
+
+  stop(): void {
+    this.stopped = true
+    this.state = 'stopped'
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer)
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = undefined
+    if (this.socket) {
+      try {
+        this.socket.close()
+      } catch {
+        /* ignore */
+      }
+      this.socket = undefined
+    }
+    this.peer?.close()
+    this.peer = undefined
+  }
+
+  private log(line: string): void {
+    this.logFn?.(line)
+  }
+
+  private async connect(): Promise<void> {
+    if (this.stopped) return
+    this.state = 'connecting'
+    let ws: WebSocketLike
+    try {
+      ws = this.wsFactory(this.cfg.hub_url)
+    } catch (err) {
+      this.log(`ws factory failed: ${err instanceof Error ? err.message : err}`)
+      this.scheduleReconnect('ws-factory-failed')
+      return
+    }
+    this.socket = ws
+
+    // Handshake state machine (client side)
+    let handshake: HandshakeClient | undefined
+    const sender = {
+      send: (m: WireMessage) => {
+        try {
+          ws.send(JSON.stringify(m))
+        } catch {
+          /* socket gone */
+        }
+      },
+    }
+    handshake = new HandshakeClient(
+      sender,
+      this.cfg.node_id,
+      this.cfg.token,
+      1, // schemaVersion
+      {
+        onOutcome: (outcome) => {
+          if (outcome.ok) {
+            this.backoff = RECONNECT_BACKOFF_BASE_MS // reset on successful connect
+            this.hubNodeId = outcome.welcome.hub_id
+            this.onConnected(ws, outcome.welcome.heartbeat_ms ?? this.heartbeatMs, outcome.welcome.lease_ms ?? this.leaseMs)
+          } else {
+            this.log(`handshake failed: ${outcome.message}`)
+            this.scheduleReconnect(`handshake:${outcome.code}`)
+          }
+        },
+      },
+    )
+    this.handshakeClient = handshake
+
+    ws.onopen = () => handshake?.start()
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data)) as WireMessage
+        this.onWire(msg)
+      } catch {
+        this.log('dropping unparseable ws frame')
+      }
+    }
+    ws.onclose = () => {
+      if (!this.stopped && this.state === 'connected') {
+        this.log('socket closed unexpectedly')
+        this.scheduleReconnect('socket-close')
+      }
+    }
+    ws.onerror = (err) => {
+      this.log(`ws error: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  private onWire(msg: WireMessage): void {
+    if (msg.type === 'rpc') {
+      this.peer?.dispatchPublic(msg.body)
+      return
+    }
+    // handshake messages are handled by HandshakeClient instance — but we
+    // create it per connection; store it on this
+    this.handshakeClient?.inbound(msg)
+  }
+
+  private handshakeClient?: HandshakeClient
+
+  private onConnected(ws: WebSocketLike, heartbeatMs: number, leaseMs: number): void {
+    this.state = 'connected'
+    this.log(`connected to hub ${this.hubNodeId}`)
+    // Upgrade ws object: keep socket reference current
+    const peer: MessagePeer = {
+      send: (m) => {
+        try {
+          ws.send(JSON.stringify({ type: 'rpc', v: 1, body: m } as WireMessage))
+        } catch {
+          /* ignore */
+        }
+      },
+    }
+    this.peer = new RpcPeer(peer, (l) => this.log(l))
+    this.registerRpcHandlers()
+    void this.registerAndReconcile()
+    // Heartbeat loop
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = setInterval(() => void this.heartbeat(), heartbeatMs)
+  }
+
+  private async registerAndReconcile(): Promise<void> {
+    try {
+      await this.peer?.request(HUB_METHODS.NODE_REGISTER, { node: this.nodeInfo() })
+    } catch (err) {
+      this.log(`register failed: ${err instanceof Error ? err.message : err}`)
+      return
+    }
+    // reconcile after register (fresh catalog)
+    try {
+      const { sessions, workspaces } = await this.collectLocalCatalog()
+      await this.peer?.request('catalog.reconcile', { node_id: this.cfg.node_id, sessions, workspaces })
+    } catch (err) {
+      this.log(`reconcile failed: ${err instanceof Error ? err.message : err}`)
+    }
+    // periodic reconcile
+    void this.scheduleReconcile()
+  }
+
+  private async collectLocalCatalog(): Promise<{ sessions: SessionInfo[]; workspaces: WorkspaceInfo[] }> {
+    let sessions: SessionInfo[] = []
+    let workspaces: WorkspaceInfo[] = []
+    try {
+      const list = (await this.bridge.callTool('sessions_list', {})).structuredContent ?? {}
+      const items = (list['sessions'] as Array<Record<string, unknown>>) ?? []
+      sessions = items.map((s) => ({
+        native_session_id: String(s.session_id ?? ''),
+        title: s.title ? String(s.title) : undefined,
+        status: (String(s.status ?? 'unknown') as SessionInfo['status']),
+        live: Boolean((s as { live?: boolean }).live),
+        updated_at: s.updated_at ? String(s.updated_at) : undefined,
+        workspace_id: s.workspace_id ? String(s.workspace_id) : undefined,
+      }))
+    } catch {
+      // health probe will report datapath issues
+    }
+    try {
+      const list = (await this.bridge.callTool('workspaces_list', {})).structuredContent ?? {}
+      const items = (list['workspaces'] as Array<Record<string, unknown>>) ?? []
+      workspaces = items.map((w) => ({
+        native_workspace_id: String(w.workspace_id ?? w.id ?? ''),
+        path: String(w.path ?? ''),
+        title: w.title ? String(w.title) : undefined,
+      }))
+    } catch {
+      /* tolerate */
+    }
+    return { sessions, workspaces }
+  }
+
+  private scheduleReconcile(): void {
+    const t = setTimeout(() => {
+      void (async () => {
+        try {
+          const { sessions, workspaces } = await this.collectLocalCatalog()
+          await this.peer?.request('catalog.reconcile', { node_id: this.cfg.node_id, sessions, workspaces })
+        } catch {
+          /* transient */
+        }
+        this.scheduleReconcile()
+      })()
+    }, this.cfg.reconcile_ms)
+    t.unref?.()
+  }
+
+  private async heartbeat(): Promise<void> {
+    if (!this.peer) return
+    this.seq++
+    const status: NodeStatus = {
+      seq: this.seq,
+      ts: new Date().toISOString(),
+      health: this.health,
+      workspace_count: 0,
+      session_count: 0,
+    }
+    try {
+      await this.peer?.request('node.heartbeat', { node_id: this.cfg.node_id, status })
+    } catch (err) {
+      this.log(`heartbeat failed: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+
+  private registerRpcHandlers(): void {
+    if (!this.peer) return
+    this.peer.on(NODE_METHODS.HEALTH, async () => this.healthPayload())
+    this.peer.on(NODE_METHODS.LIST_WORKSPACES, async () => {
+      const res = await this.bridge.callTool('workspaces_list', {})
+      return res.structuredContent ?? res.content ?? []
+    })
+    this.peer.on(NODE_METHODS.LIST_SESSIONS, async () => {
+      const res = await this.bridge.callTool('sessions_list', {})
+      return res.structuredContent ?? res.content ?? []
+    })
+    this.peer.on(NODE_METHODS.CREATE_SESSION, async (p) => {
+      const params = p as { workspace?: string; title?: string; initial_message?: string }
+      const res = await this.bridge.callTool('sessions_create', {
+        workspace: params.workspace,
+        title: params.title,
+        initial_message: params.initial_message,
+      })
+      return res.structuredContent ?? res.content ?? {}
+    })
+    this.peer.on(NODE_METHODS.GET_SESSION, async (p) => {
+      const { session_id } = p as { session_id: string }
+      const res = await this.bridge.callTool('sessions_get', { session_id })
+      return res.structuredContent ?? res.content ?? {}
+    })
+    this.peer.on(NODE_METHODS.RESUME_SESSION, async (p) => {
+      const { session_id } = p as { session_id: string }
+      const res = await this.bridge.callTool('sessions_resume', { session_id })
+      return res.structuredContent ?? res.content ?? {}
+    })
+    this.peer.on(NODE_METHODS.PROMPT, async (p) => {
+      const { session_id, message } = p as { session_id: string; message: string }
+      const res = await this.bridge.callTool('sessions_prompt', { session_id, message })
+      return res.structuredContent ?? res.content ?? {}
+    })
+    this.peer.on(NODE_METHODS.CANCEL, async (p) => {
+      const { session_id } = p as { session_id: string }
+      const res = await this.bridge.callTool('sessions_cancel', { session_id })
+      return res.structuredContent ?? res.content ?? {}
+    })
+    // Generic passthrough: hub routes any MCP tool here.
+    this.peer.on(NODE_METHODS.MCP_CALL, async (p) => {
+      const { tool, args } = p as { tool: string; args?: unknown }
+      const res = await this.bridge.callTool(tool, args ?? {})
+      // Surface structured content to the hub (fall back to content blocks).
+      return res.structuredContent ?? (res.content ? { content: res.content } : res)
+    })
+    this.peer.on(NODE_METHODS.PRESENCE_REPORT, async (p) => {
+      this.log(`presence report: ${JSON.stringify(p).slice(0, 120)}`)
+      return { ok: true }
+    })
+  }
+
+  private async healthPayload(): Promise<unknown> {
+    await this.probeLocal()
+    return {
+      node_id: this.cfg.node_id,
+      health: this.health,
+      versions: { agent: '0.1.0', protocol: 1 },
+    }
+  }
+
+  /** Probe the local bridge; update layered health. */
+  async probeLocal(): Promise<HealthReport> {
+    const now = new Date().toISOString()
+    this.health.channel = { status: 'ok', checked_at: now }
+    try {
+      const res = await this.bridge.callTool('supervisor_health', {})
+      const sc = (res.structuredContent ?? {}) as {
+        status?: string
+        serena?: { connected?: boolean }
+        adapters?: Array<{ id: string; health?: string }>
+        tunnel?: unknown
+      }
+      this.health.adapter = { status: 'ok', checked_at: now }
+      this.health.datapath = { status: 'ok', checked_at: now }
+      this.health.serena = sc.serena?.connected ? { status: 'ok', checked_at: now } : { status: 'degraded', code: 'serena-disconnected', checked_at: now }
+      if (sc.tunnel !== undefined) this.health.tunnel = { status: 'ok', checked_at: now }
+      this.log(`local probe ok (serena ${sc.serena?.connected ? 'connected' : 'disconnected'})`)
+    } catch (err) {
+      this.health.adapter = { status: 'down', code: 'adapter-unreachable', detail: err instanceof Error ? err.message.slice(0, 120) : String(err), checked_at: now }
+      this.health.datapath = { status: 'down', code: 'datapath-unreachable', checked_at: now }
+      this.health.serena = { status: 'unknown', checked_at: now }
+      this.log(`local probe failed: ${err instanceof Error ? err.message : err}`)
+    }
+    return this.health
+  }
+
+  private nodeInfo(): NodeInfo {
+    return {
+      node_id: this.cfg.node_id,
+      display_name: this.cfg.display_name,
+      platform: {
+        os: platformOs(),
+        arch: process.arch,
+        release: process.platform === 'darwin' ? 'macOS' : process.platform,
+        nodeVersion: process.version,
+      },
+      versions: { agent: '0.1.0', protocol: 1 },
+      capabilities: {
+        sessions: true,
+        serena: true,
+        tunnel: false,
+        presenceProvider: !!this.presenceProvider,
+        defaultNode: false,
+      },
+    }
+  }
+
+  private scheduleReconnect(reason: string): void {
+    if (this.stopped) return
+    if (this.reconnectTimer) return
+    const delay = this.backoff + Math.random() * 500
+    this.backoff = Math.min(this.backoff * 2, RECONNECT_BACKOFF_MAX_MS)
+    this.state = 'reconnecting'
+    this.log(`reconnect in ${Math.round(delay)}ms (${reason})`)
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      this.peer?.close()
+      this.peer = undefined
+      void this.connect()
+    }, delay)
+    this.reconnectTimer.unref?.()
+  }
+}
+
+function platformOs(): 'darwin' | 'win32' | 'linux' {
+  switch (process.platform) {
+    case 'darwin':
+      return 'darwin'
+    case 'win32':
+      return 'win32'
+    default:
+      return 'linux'
+  }
+}
