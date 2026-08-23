@@ -7,9 +7,10 @@ const pkgs = ['protocol', 'store', 'hub', 'node-agent', 'presence', 'platform', 
 
 export default defineConfig({
   resolve: {
-    alias: Object.fromEntries(
-      pkgs.map((p) => [`@dsh-helm/${p}`, resolve(root, `packages/${p}/src/index.ts`)]),
-    ),
+    alias: pkgs.map((p) => ({
+      find: new RegExp(`^@dsh-helm/${p}$`),
+      replacement: resolve(root, `packages/${p}/src/index.ts`),
+    })),
   },
   test: {
     include: ['packages/*/tests/**/*.test.ts', 'tests/**/*.test.ts'],

@@ -45,6 +45,11 @@ export class PresenceRegistry {
     this.ambiguityWindowMs = opts.ambiguityWindowMs ?? PRESENCE_AMBIGUITY_WINDOW_MS
   }
 
+  /** Ambiguity window (ms) — exposed for the router's evidence builder. */
+  get ambiguityWindow(): number {
+    return this.ambiguityWindowMs
+  }
+
   /** Record a presence claim; clamps TTL by source and returns the stored record. */
   claim(claim: PresenceClaim): PresenceRecord {
     const isManual = claim.source === 'manual'

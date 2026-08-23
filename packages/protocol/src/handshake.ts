@@ -93,8 +93,10 @@ export class HandshakeServer {
           heartbeat_ms: this.opts.heartbeatMs,
           lease_ms: this.opts.leaseMs,
         }
-        this.sender.send(welcome)
+        // Local auth callback first so the RPC peer is ready before the
+        // client receives welcome and starts issuing requests.
         this.cb.onWelcome(this.hello, msg, this.opts.hubId, this.opts.schemaVersion, this.opts.heartbeatMs, this.opts.leaseMs)
+        this.sender.send(welcome)
         return
       }
       default:
