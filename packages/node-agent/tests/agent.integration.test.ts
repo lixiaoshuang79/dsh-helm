@@ -3,7 +3,7 @@ import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceR
 import { ControlPlane, HubConnection } from '../../hub/src/index.js'
 import { HelmNodeAgent, type WebSocketLike } from '../src/index.js'
 import { FakeBackend } from './backend-fixtures.js'
-import type { WireMessage, NodeInfo } from '../../protocol/src/index.js'
+
 
 /**
  * FakeWebSocket: in-memory duplex that satisfies WebSocketLike (agent side)

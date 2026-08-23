@@ -13,12 +13,16 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "vitest run tests/integration",
-    "clean": "rm -rf packages/*/lib"
+    "clean": "rm -rf packages/*/lib",
+    "lint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"tests/**/*.ts\"",
+    "validate": "npm run typecheck && npm run lint && npm run test"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.18.1",
+    "eslint": "^9.39.5",
     "typescript": "^5.6.0",
+    "typescript-eslint": "^8.67.0",
     "vitest": "^2.1.0"
   }
 }

@@ -13,7 +13,7 @@
  * tests can run it over in-memory pipes while production runs it over ws/wss.
  */
 
-import type { WireMessage, NodeInfo, NodeStatus, SessionInfo, WorkspaceInfo, PresenceClaim, HealthReport, AuditEntry } from '@dsh-helm/protocol'
+import type { NodeInfo, NodeStatus, SessionInfo, WorkspaceInfo, PresenceClaim, AuditEntry } from '@dsh-helm/protocol'
 import { HUB_METHODS, NODE_METHODS, PROTOCOL_ERROR } from '@dsh-helm/protocol'
 import type { DshHelmStore, NodeRegistry, StoredNode, SessionCatalog, WorkspaceCatalog, PresenceRegistry, AuditLog } from '@dsh-helm/store'
 import { Router, type RouteResult } from './router.js'
@@ -262,7 +262,7 @@ export class ControlPlane {
     audit.append(entry)
   }
 
-  private auditResult(callId: string, op: string, route: RouteResult, result: string, danger?: string): void {
+  private auditResult(callId: string, op: string, route: RouteResult, result: string, _danger?: string): void {
     this.opts.log?.(`route-result ${callId} ${op} ${result}`)
     const audit = this.opts.audit
     if (!audit) return

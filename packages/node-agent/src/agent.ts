@@ -133,7 +133,6 @@ export class HelmNodeAgent {
     this.socket = ws
 
     // Handshake state machine (client side)
-    let handshake: HandshakeClient | undefined
     const sender = {
       send: (m: WireMessage) => {
         try {
@@ -143,7 +142,7 @@ export class HelmNodeAgent {
         }
       },
     }
-    handshake = new HandshakeClient(
+    const handshake = new HandshakeClient(
       sender,
       this.cfg.node_id,
       this.cfg.token,
@@ -195,7 +194,7 @@ export class HelmNodeAgent {
 
   private handshakeClient?: HandshakeClient
 
-  private onConnected(ws: WebSocketLike, heartbeatMs: number, leaseMs: number): void {
+  private onConnected(ws: WebSocketLike, heartbeatMs: number, _leaseMs: number): void {
     this.state = 'connected'
     this.log(`connected to hub ${this.hubNodeId}`)
     // Upgrade ws object: keep socket reference current

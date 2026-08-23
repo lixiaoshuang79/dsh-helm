@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { RpcPeer, pairRpcPeers } from '../src/jsonrpc.js'
+import { pairRpcPeers } from '../src/jsonrpc.js'
 
 describe('RpcPeer', () => {
   it('request/response round trip', async () => {

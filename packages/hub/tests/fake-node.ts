@@ -7,7 +7,7 @@
  * or a real DSH.
  */
 
-import type { WireMessage, NodeInfo, SessionInfo, WorkspaceInfo, PresenceClaim, HealthReport } from '@dsh-helm/protocol'
+import type { NodeInfo, SessionInfo, WorkspaceInfo, WireMessage } from '@dsh-helm/protocol'
 import { HandshakeClient, NODE_METHODS, HUB_METHODS, computeMac, generateNonce } from '@dsh-helm/protocol'
 import { RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
 

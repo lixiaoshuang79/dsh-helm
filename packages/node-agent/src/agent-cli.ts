@@ -50,15 +50,13 @@ export function runAgent(opts: AgentCliOptions, log: (l: string) => void = conso
 
   // Presence chain: manual pin > desktop sidecar (macOS) > browser listener.
   let listener: PresenceListener | undefined
-  let presenceProvider: { probe(): Promise<unknown> } | undefined
   const providers: Array<{ probe(): Promise<unknown> }> = []
   providers.push(new ManualPresenceProvider({ nodeId: cfg.node_id }))
   if (process.platform === 'darwin') {
     const sidecar = new DesktopSidecarPresenceProvider({ nodeId: cfg.node_id, log })
     providers.push(sidecar)
   }
-  const chain = new CompositePresenceProvider(providers as never[])
-  presenceProvider = chain
+  const presenceProvider = new CompositePresenceProvider(providers as never[])
 
   const agent = new HelmNodeAgent({
     config: cfg,

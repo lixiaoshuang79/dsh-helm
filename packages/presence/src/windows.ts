@@ -15,7 +15,7 @@ export interface WindowsAdapterOptions {
   /** Process names that count as active (exe name without .exe, lowercase). */
   activeProcesses?: string[]
   activeConfidence?: number
-  exec?: (cmd: string) => Promise<string>
+  exec?: (_cmd: string) => Promise<string>
   log?: (line: string) => void
 }
 
@@ -46,7 +46,7 @@ export class WindowsDesktopPresenceProvider implements PresenceProvider {
   private nodeId: string
   private activeProcesses: string[]
   private activeConfidence: number
-  private exec: (cmd: string) => Promise<string>
+  private exec: (_cmd: string) => Promise<string>
   private logFn?: (line: string) => void
 
   constructor(opts: WindowsAdapterOptions) {
@@ -77,7 +77,7 @@ export class WindowsDesktopPresenceProvider implements PresenceProvider {
   }
 }
 
-async function defaultPsExec(cmd: string): Promise<string> {
+async function defaultPsExec(_cmd: string): Promise<string> {
   const { execFile } = await import('node:child_process')
   return new Promise((resolve, reject) => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WINDOWS_FOREGROUND_PS], { timeout: 5000 }, (err, stdout) => {

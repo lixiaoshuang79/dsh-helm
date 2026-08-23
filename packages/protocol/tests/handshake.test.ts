@@ -4,7 +4,7 @@ import { generateNodeToken } from '../src/crypto.js'
 import { PROTOCOL_ERROR } from '../src/constants.js'
 import type { WireMessage } from '../src/envelope.js'
 
-function link(serverSide: HandshakeServer, clientSide: HandshakeClient) {
+function link(_serverSide: HandshakeServer, _clientSide: HandshakeClient) {
   let toClient: (m: WireMessage) => void = () => {}
   const serverSender = { send: (m: WireMessage) => toClient(m) }
   // Rebuild server with the routed sender to avoid double-binding;
@@ -150,7 +150,7 @@ describe('handshake direct wire helper', () => {
   it('link helper is usable', () => {
     const token = generateNodeToken()
     const nodeId = '8f7b6a2e-1c3d-4e5f-9a8b-7c6d5e4f3a2b'
-    let toClient: (m: WireMessage) => void = () => {}
+    const toClient: (m: WireMessage) => void = () => {}
     const ss = new HandshakeServer(
       { send: (m) => toClient(m) },
       { hubId: 'hub-1', schemaVersion: 1, heartbeatMs: 15000, leaseMs: 45000, lookupToken: () => token },

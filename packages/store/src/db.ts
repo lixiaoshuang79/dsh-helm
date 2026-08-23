@@ -66,8 +66,7 @@ function loadSqlite(): { DatabaseSync: DatabaseSyncLike } {
   }
   try {
     Reflect.set(process, 'emitWarning', filtered)
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    sqliteModule = require('node:sqlite') as { DatabaseSync: DatabaseSyncLike }
+      sqliteModule = require('node:sqlite') as { DatabaseSync: DatabaseSyncLike }
   } finally {
     Reflect.set(process, 'emitWarning', emitWarning)
   }

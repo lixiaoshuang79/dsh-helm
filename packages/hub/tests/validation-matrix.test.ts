@@ -6,7 +6,7 @@
  * fallback fail-closed, persistence crash/restart, offline/recovery.
  */
 
-import { describe, expect, it, beforeEach } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceRegistry } from '../../store/src/index.js'
 import { ControlPlane, HubConnection, HubMcpServer } from '../src/index.js'
 import { FakeNode } from '../tests/fake-node.js'

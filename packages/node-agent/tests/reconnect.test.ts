@@ -11,8 +11,6 @@ import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceR
 import { ControlPlane, HubConnection } from '../../hub/src/index.js'
 import { HelmNodeAgent } from '../src/index.js'
 import { FakeBackend } from './backend-fixtures.js'
-import type { WireMessage, NodeInfo } from '../../protocol/src/index.js'
-import { HandshakeServer } from '../../protocol/src/index.js'
 
 class FakeHubSocket {
   readyState = 1

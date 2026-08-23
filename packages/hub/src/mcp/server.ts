@@ -79,7 +79,7 @@ export class HubMcpServer {
 
   // ---- discovery tools (hub-local answers) ----
 
-  private async handleDiscovery(def: ToolDef, args: Record<string, unknown>, callId: string): Promise<McpCallResult> {
+  private async handleDiscovery(def: ToolDef, args: Record<string, unknown>, _callId: string): Promise<McpCallResult> {
     switch (def.name) {
       case 'projects_list':
       case 'workspaces_list': {
