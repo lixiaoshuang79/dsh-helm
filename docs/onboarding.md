@@ -33,11 +33,8 @@
 ssh -N -L 3470:127.0.0.1:3470 <user>@<hub-机器>        # 新机器上执行
 #   之后 hub_url = ws://127.0.0.1:3470
 
-# B. WSS 域名（hub 侧已配 DSH_HELM_BIND=0.0.0.0 + TLS 反代终止 wss）
-#   hub_url = wss://helm.example.com/
-
-# C. 可信内网直连（仅限完全可信的 LAN；ws 明文可被同网段嗅探，见威胁模型 T1）
-#   hub_url = ws://192.168.x.x:3470
+# B. WSS 域名（hub 侧已配 DSH_HELM_BIND=0.0.0.0 + TLS 反代终止 wss）→ hub_url = wss://helm.example.com/
+# C. 可信内网直连（仅限完全可信的 LAN；ws 明文可被同网段嗅探，见威胁模型 T1）→ hub_url = ws://192.168.x.x:3470
 ```
 
 > ⚠️ 明文 `ws://` 只允许 loopback/SSH 隧道/可信内网；跨不可信网络必须 `wss://`（`node-agent/src/config.ts` 与架构决策 2）。
@@ -113,7 +110,7 @@ dsh-helm-hub --mesh-port 3470 --mcp-port 3471 --store ~/.dsh/helm/store.sqlite3 
 
 - **token 表就是这一份环境变量**：hub 不落盘 token、不读配置文件；`tokenLookup(node_id)` 找不到 → 握手必失败（`AUTH_FAILED`），所以新节点必须先注入再连。
 - 生产建议用 **secrets 管理**（代码注释原话）：systemd `EnvironmentFile`、launchd plist 的 `EnvironmentVariables`、或密钥服务注入——不要写死在 shell 历史里。
-- 换 token 或移除节点：改 `DSH_HELM_TOKEN` 后重启 hub 生效；`rotate-token` 后 hub 侧必须同步更新（轮换窗口内新旧 token 可并存）。
+- 换 token / 移除节点 / `rotate-token`：改 `DSH_HELM_TOKEN` 后重启 hub 生效（轮换窗口内新旧 token 可并存）。
 - hub 的 MCP（3471）v1 **无鉴权**，默认只绑 loopback——**严禁**把 3471 映射到公网（威胁模型 T1/T13）。
 
 ## 5. 启动 agent 并配置自启
@@ -265,7 +262,7 @@ presence 影响**未显式指定目标**的调用路由（第 4 优先级）。�
 | manual | 无需配置；随时可用 | `presence_claim` 工具 / CLI `presence claim <node>`：confidence 1.0、pinned、默认 TTL 10min |
 | desktop（macOS，**自动**） | agent 启动即启用 | `DesktopSidecarPresenceProvider`：`osascript` 查 System Events 前台应用；ChatGPT/浏览器前台 → confidence 0.9，否则 0.2；每 10s 探测。**首次需授予「辅助功能」权限**（System Events） |
 | desktop（Windows） | 接 agent 时启用适配器 | `WindowsDesktopPresenceProvider` scaffold：PowerShell + user32 `GetForegroundWindow` 取前台进程名；chatgpt/msedge/chrome/firefox/brave → 0.9 |
-| browser | 手动加载扩展 | `packages/presence/src/browser.ts` 生成 MV3 扩展 scaffold（manifest/background/content，host_permissions 仅 `127.0.0.1`）；chrome://extensions → 开发者模式 → 加载已解压扩展；上报 chatgpt.com 焦点到本机 `PresenceListener`（`127.0.0.1:3472/presence/...`）。**注意**：`content.js` 里上报端口是常量，需与 listener 端口（默认 3472）一致 |
+| browser | 手动加载扩展 | `packages/presence/src/browser.ts` 生成 MV3 扩展 scaffold（manifest/background/content，host_permissions 仅 `127.0.0.1`）；chrome://extensions → 开发者模式 → 加载已解压扩展；上报 chatgpt.com 焦点到本机 `PresenceListener`（`127.0.0.1:3472/presence/...`）。注意 `content.js` 里上报端口是常量，需与 listener 端口（默认 3472）一致 |
 | idle | 预留 | 显式低置信来源（协议保留） |
 
 机制要点（`protocol/src/constants.ts`）：renew 20s / TTL 60s（hub clamp）；**15s 歧义窗口**内两台 fresh high-confidence → 路由视为 ambiguous 不自动选；`pinned` manual claim 直接胜出；显式 `target_node` 永远优先于 presence。
