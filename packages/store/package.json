@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-helm/store",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "SQLite store: nodes, presence leases, session catalog, workspace catalog, audit log, route log (WAL, schema_version migration)",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dsh-helm/protocol": "workspace:*"
+  }
+}

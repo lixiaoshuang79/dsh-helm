@@ -1,0 +1,19 @@
+{
+  "name": "@dsh-helm/platform",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Cross-platform adapters: paths, service management (launchd/systemd/Windows), process helpers",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {}
+}

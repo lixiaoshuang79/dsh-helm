@@ -1,0 +1,21 @@
+{
+  "name": "@dsh-helm/presence",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Presence providers: manual claim, macOS desktop sidecar, Windows adapter scaffold, browser helper scaffold",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dsh-helm/protocol": "workspace:*"
+  }
+}

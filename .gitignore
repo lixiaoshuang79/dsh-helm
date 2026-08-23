@@ -1,0 +1,11 @@
+node_modules/
+lib/
+*.tsbuildinfo
+coverage/
+dist/
+.tmp/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+.DS_Store

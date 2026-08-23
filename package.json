@@ -1,0 +1,23 @@
+{
+  "name": "dsh-helm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-node control plane for DSH (DeepSeek Harness) ChatGPT Helm connectors",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "build": "tsc -b packages/*/tsconfig.json",
+    "typecheck": "tsc -b packages/*/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run tests/integration",
+    "clean": "rm -rf packages/*/lib"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^22.0.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@dsh-helm/protocol",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "node-protocol v1: wire envelope, JSON-RPC layer, HMAC challenge handshake, shared types",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {}
+}

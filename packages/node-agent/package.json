@@ -1,0 +1,24 @@
+{
+  "name": "@dsh-helm/node-agent",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "DSH Node Agent: local DSH adapter bridge (MCP client to local helm daemon), remote WebSocket agent, heartbeat/reconnect/auth, metadata reconcile",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@dsh-helm/protocol": "workspace:*",
+    "@dsh-helm/presence": "workspace:*",
+    "ws": "^8.18.0",
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}
