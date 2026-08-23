@@ -199,7 +199,7 @@ export class HubMcpServer {
     }
     // strip control params before forwarding
     const { target_node: _t, ...forwardArgs } = args
-    const result = await this.cp.forward(route, def.name, forwardArgs, callId)
+    const result = await this.cp.forward(route, def.name, forwardArgs, callId, def.danger)
     return this.text({ ...(result as Record<string, unknown>), _route: route.decision })
   }
 

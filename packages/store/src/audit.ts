@@ -59,6 +59,11 @@ export class AuditLog {
     return (this.db.prepare(`SELECT COUNT(*) AS c FROM audit`).get() as { c: number }).c
   }
 
+  /** Update the result of a pending audit row (correlated by call_id+op). */
+  updateResult(callId: string, op: string, result: string): void {
+    this.db.prepare(`UPDATE audit SET result = ? WHERE call_id = ? AND op = ? AND result = 'pending'`).run(result, callId, op)
+  }
+
   /** Append a route decision record. */
   logRoute(callId: string, op: string, decision: RouteDecision): void {
     this.db

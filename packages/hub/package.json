@@ -19,7 +19,6 @@
     "@dsh-helm/protocol": "workspace:*",
     "@dsh-helm/store": "workspace:*",
     "ws": "^8.18.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
     "@dsh-helm/platform": "workspace:*"
   },
   "bin": {

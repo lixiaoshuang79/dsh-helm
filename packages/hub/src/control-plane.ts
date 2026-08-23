@@ -13,9 +13,9 @@
  * tests can run it over in-memory pipes while production runs it over ws/wss.
  */
 
-import type { WireMessage, NodeInfo, NodeStatus, SessionInfo, WorkspaceInfo, PresenceClaim, HealthReport } from '@dsh-helm/protocol'
+import type { WireMessage, NodeInfo, NodeStatus, SessionInfo, WorkspaceInfo, PresenceClaim, HealthReport, AuditEntry } from '@dsh-helm/protocol'
 import { HUB_METHODS, NODE_METHODS, PROTOCOL_ERROR } from '@dsh-helm/protocol'
-import type { DshHelmStore, NodeRegistry, StoredNode, SessionCatalog, WorkspaceCatalog, PresenceRegistry } from '@dsh-helm/store'
+import type { DshHelmStore, NodeRegistry, StoredNode, SessionCatalog, WorkspaceCatalog, PresenceRegistry, AuditLog } from '@dsh-helm/store'
 import { Router, type RouteResult } from './router.js'
 import { HealthAggregator } from './health.js'
 
@@ -34,6 +34,8 @@ export interface ControlPlaneOptions {
   tokenLookup(nodeId: string): string | undefined
   /** In-memory map of live connections by node_id. */
   connections: Map<string, NodeConnection>
+  /** Optional persisted audit/route log (no bodies, no secrets). */
+  audit?: AuditLog
   log?: (line: string) => void
 }
 
@@ -181,7 +183,7 @@ export class ControlPlane {
   }
 
   /** Forward an operation to the routed node (or reject). */
-  async forward(route: RouteResult, op: string, params?: unknown, callId = `c${++this.audit}`): Promise<unknown> {
+  async forward(route: RouteResult, op: string, params?: unknown, callId = `c${++this.audit}`, danger = 'read'): Promise<unknown> {
     if (route.action !== 'forward' || !route.decision.node_id) {
       throw rpcError(-32010, route.errorCode ?? 'no_route', route.decision.reason)
     }
@@ -189,13 +191,13 @@ export class ControlPlane {
     if (!conn) {
       throw rpcError(-32011, 'node_unavailable', `node ${route.decision.node_id} has no live connection`)
     }
-    this.auditRoute(callId, op, route)
+    this.auditRoute(callId, op, route, danger)
     try {
       const res = await conn.request(NODE_METHODS.MCP_CALL, { tool: op, args: params }, 60_000)
-      this.auditResult(callId, op, route, 'ok')
+      this.auditResult(callId, op, route, 'ok', danger)
       return res
     } catch (err) {
-      this.auditResult(callId, op, route, `error:${err instanceof Error ? err.message.slice(0, 80) : 'unknown'}`)
+      this.auditResult(callId, op, route, `error:${err instanceof Error ? err.message.slice(0, 80) : 'unknown'}`, danger)
       throw err
     }
   }
@@ -242,14 +244,33 @@ export class ControlPlane {
     return this.opts.nodes.list().map((n) => ({ node: n, connection: this.opts.connections.has(n.node_id) }))
   }
 
-  private auditRoute(callId: string, op: string, route: RouteResult): void {
+  private auditRoute(callId: string, op: string, route: RouteResult, danger: string): void {
     this.opts.log?.(`route ${callId} ${op} -> ${route.decision.node_id} (${route.decision.outcome})`)
-    // route_log persistence lives in the store layer; ControlPlane keeps an
-    // in-memory ring for diagnostics (persisted audit added in later phase).
+    const audit = this.opts.audit
+    if (!audit) return
+    audit.logRoute(callId, op, route.decision)
+    const entry: AuditEntry = {
+      ts: new Date().toISOString(),
+      call_id: callId,
+      op,
+      target_node: route.decision.node_id ?? '',
+      decision: route.decision.outcome,
+      danger,
+      explicit: route.decision.explicit ?? false,
+      result: 'pending',
+    }
+    audit.append(entry)
   }
 
-  private auditResult(callId: string, op: string, route: RouteResult, result: string): void {
+  private auditResult(callId: string, op: string, route: RouteResult, result: string, danger?: string): void {
     this.opts.log?.(`route-result ${callId} ${op} ${result}`)
+    const audit = this.opts.audit
+    if (!audit) return
+    // update the pending audit row's result
+    const rows = audit.list(100, op)
+    const row = rows.find((r) => r.call_id === callId)
+    if (!row) return
+    audit.updateResult(callId, op, result)
   }
 }
 

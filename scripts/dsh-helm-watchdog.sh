@@ -59,10 +59,21 @@ if [ "$STOP" = "1" ]; then
     WPID="$(cat "$PID_FILE" 2>/dev/null || true)"
     if [ -n "$WPID" ] && kill -0 "$WPID" 2>/dev/null; then
       kill "$WPID" 2>/dev/null && echo "[dsh-helm] ✓ 已发送停止信号给 watchdog（pid $WPID）"
+      # 等待退出（最长 6s；watchdog 的 sleep 被打断后会走 cleanup 退出）
+      for _ in 1 2 3 4 5 6; do
+        kill -0 "$WPID" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$WPID" 2>/dev/null; then
+        echo "[dsh-helm] ⚠ watchdog（pid $WPID）6s 内未退出，请人工检查"
+      else
+        echo "[dsh-helm] ✓ watchdog 已退出"
+      fi
+      rm -f "$PID_FILE"
     else
       echo "[dsh-helm] watchdog 未在运行（pid 文件过期）"
+      rm -f "$PID_FILE"
     fi
-    rm -f "$PID_FILE"
   else
     echo "[dsh-helm] watchdog 未在运行（无 pid 文件）"
   fi
@@ -84,22 +95,25 @@ if [ -f "$PID_FILE" ]; then
   log "检测到过期 pid 文件（$OLD_PID），接管"
 fi
 echo "$$" > "$PID_FILE"
-# 清理钩子：正常退出/被杀都删锁
+# 清理钩子：正常退出/被杀都删锁（只挂 EXIT；INT/TERM 走 exit 0 触发 EXIT，
+# 避免 cleanup 被 EXIT+TERM 双触发打两遍日志）
 cleanup() {
   if [ -f "$PID_FILE" ] && [ "$(cat "$PID_FILE" 2>/dev/null || true)" = "$$" ]; then
     rm -f "$PID_FILE"
   fi
   log "watchdog 退出"
-  exit 0
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 0' INT TERM
 
 # ---------- 探测函数 ----------
 # 本地 daemon MCP 是否可达（200/401 均算可达；只有连接失败才算挂）
+# 注意：curl 失败时 -w 输出 "000"，这里用 || true 兜底（不要 echo '000'，
+# 否则会得到 000000 且永远不等于 000）
 daemon_alive() {
   local code
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$DAEMON_URL" 2>/dev/null || echo '000')"
-  [ "$code" != "000" ]
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$DAEMON_URL" 2>/dev/null || true)"
+  [ -n "$code" ] && [ "$code" != "000" ]
 }
 
 # node agent 是否在跑（锚定 pgrep，防误匹配其他进程）
@@ -117,6 +131,8 @@ start_agent() {
 log "watchdog 启动（interval=${CHECK_INTERVAL}s，pid $$）"
 
 # ---------- 主循环 ----------
+# sleep 放后台 + wait：信号可打断等待（sleep 是子进程，直接前台 sleep 时
+# bash 要等它跑完才处理 trap，--stop 会滞后最多一个周期）
 while true; do
   if agent_alive; then
     :
@@ -130,5 +146,6 @@ while true; do
       log "   daemon 恢复后本 watchdog 会自动拉起 agent，无需手动干预"
     fi
   fi
-  sleep "$CHECK_INTERVAL"
+  sleep "$CHECK_INTERVAL" &
+  wait
 done

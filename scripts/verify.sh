@@ -118,9 +118,10 @@ echo ""
 echo "[dsh-helm] --- L3 本地 daemon MCP (3457) ---"
 # 可达性判定：任何 HTTP 响应（200/401/403...）都算服务活着；
 # 401 是无 token 时 MCP 的正常认证拒绝，不是连接故障。
-HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$MCP_URL" 2>/dev/null || echo '000')"
+# curl 失败时 -w 输出 "000"，用 || true 兜底（不要 echo '000'，会得到 000000）
+HTTP_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$MCP_URL" 2>/dev/null || true)"
 case "$HTTP_CODE" in
-  000)
+  000|"")
     warn "3457 不可达（连接失败）——本机 helm daemon 未运行？agent 的 datapath 会不可用"
     WARN=$((WARN+1))
     ;;
