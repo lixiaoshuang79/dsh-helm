@@ -1,16 +1,23 @@
 import { describe, expect, it } from 'vitest'
-import { LocalDshBridge } from '../src/bridge.js'
+import { McpLocalHelmBackend, readTokenFile, defaultHelmTokenFile } from '../src/bridge.js'
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 /**
  * Fake daemon: minimal MCP streamable HTTP server over a fake fetch.
- * Responds to initialize / tools/call with session-id management.
+ * Responds to initialize / tools/list / tools/call with session-id management.
  */
-function fakeDaemon(opts: { failTool?: string; status?: number } = {}) {
-  const calls: Array<{ method: string; params: unknown }> = []
+function fakeDaemon(opts: { failTool?: string; status?: number; requireAuth?: boolean } = {}) {
+  const calls: Array<{ method: string; params: unknown; auth?: string }> = []
   let sessionId: string | undefined
   const fetchImpl = async (url: string, init: { headers?: Record<string, string>; body?: string }) => {
     const body = JSON.parse(init.body ?? '{}')
-    calls.push({ method: body.method, params: body.params })
+    const auth = init.headers?.['Authorization'] ?? init.headers?.['authorization']
+    calls.push({ method: body.method, params: body.params, auth })
+    if (opts.requireAuth && !auth) {
+      return new Response('unauthorized', { status: 401, headers: { 'content-type': 'text/plain' } })
+    }
     const headers: Record<string, string> = { 'content-type': 'application/json' }
     if (!sessionId) {
       sessionId = 'sess-123'
@@ -33,6 +40,8 @@ function fakeDaemon(opts: { failTool?: string; status?: number } = {}) {
           result = { content: [{ type: 'text', text: 'boom' }], isError: true }
         } else if (name === 'sessions_list') {
           result = { structuredContent: { sessions: [{ session_id: 's-1', status: 'idle', live: false }] } }
+        } else if (name === 'supervisor_health') {
+          result = { structuredContent: { status: 'ok', serena: { connected: true } } }
         } else {
           result = { structuredContent: { ok: true } }
         }
@@ -46,24 +55,46 @@ function fakeDaemon(opts: { failTool?: string; status?: number } = {}) {
   return { fetchImpl, calls }
 }
 
-describe('LocalDshBridge', () => {
+describe('McpLocalHelmBackend (LocalHelmBackend default)', () => {
   it('connect performs initialize and stores server info + session id', async () => {
     const { fetchImpl } = fakeDaemon()
-    const b = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
     const info = await b.connect()
     expect(info.name).toBe('helm-daemon')
     expect(b.connected).toBe(true)
   })
 
-  it('rejects missing bearer token with 401 from daemon', async () => {
-    const { fetchImpl } = fakeDaemon({ status: 401 })
-    const b = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'bad', fetchImpl: fetchImpl as unknown as typeof fetch })
+  it('sends Bearer token on every request', async () => {
+    const { fetchImpl, calls } = fakeDaemon({ requireAuth: true })
+    const b = new McpLocalHelmBackend({ token: 'secret-tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    const info = await b.connect()
+    expect(info.name).toBe('helm-daemon')
+    expect(calls[0]!.auth).toBe('Bearer secret-tok')
+  })
+
+  it('rejects with 401 when auth missing and daemon requires it', async () => {
+    const { fetchImpl } = fakeDaemon({ requireAuth: true })
+    const b = new McpLocalHelmBackend({ token: '', fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(b.connect()).rejects.toThrow(/401/)
+  })
+
+  it('reads token from the local token file when token omitted (never argv/log)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-helm-tok-'))
+    const tokenFile = join(dir, 'token')
+    writeFileSync(tokenFile, 'file-secret\n', { mode: 0o600 })
+    try {
+      const { fetchImpl, calls } = fakeDaemon({ requireAuth: true })
+      const b = new McpLocalHelmBackend({ tokenFile, fetchImpl: fetchImpl as unknown as typeof fetch })
+      await b.connect().catch(() => {})
+      expect(calls[0]!.auth).toBe('Bearer file-secret')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('calls tools and returns structuredContent', async () => {
     const { fetchImpl, calls } = fakeDaemon()
-    const b = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
     await b.connect()
     const res = await b.callTool('sessions_list', {})
     expect(res.structuredContent).toEqual({ sessions: [{ session_id: 's-1', status: 'idle', live: false }] })
@@ -72,7 +103,7 @@ describe('LocalDshBridge', () => {
 
   it('throws on isError tool results', async () => {
     const { fetchImpl } = fakeDaemon({ failTool: 'sessions_create' })
-    const b = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
     await b.connect()
     await expect(b.callTool('sessions_create', {})).rejects.toThrow(/boom/)
   })
@@ -81,15 +112,56 @@ describe('LocalDshBridge', () => {
     const fetchImpl = async () => {
       throw new Error('ECONNREFUSED 127.0.0.1:3457')
     }
-    const b = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
     await expect(b.connect()).rejects.toThrow(/unreachable/)
   })
 
-  it('lists tools', async () => {
+  it('lists tools dynamically', async () => {
     const { fetchImpl } = fakeDaemon()
-    const b = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
     await b.connect()
     const tools = await b.listTools()
     expect(tools.map((t) => t.name)).toContain('sessions_list')
+  })
+
+  it('probeHealth maps supervisor_health into structured {ok, detail}', async () => {
+    const { fetchImpl } = fakeDaemon()
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    await b.connect()
+    expect(await b.probeHealth()).toEqual({ ok: true })
+  })
+
+  it('probeHealth reports failure when daemon down', async () => {
+    const { fetchImpl } = fakeDaemon({ failTool: 'supervisor_health' })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    await b.connect()
+    const h = await b.probeHealth()
+    expect(h.ok).toBe(false)
+    expect(h.detail).toContain('boom')
+  })
+
+  it('reconcile returns structured sessions/workspaces', async () => {
+    const { fetchImpl } = fakeDaemon()
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    await b.connect()
+    const r = await b.reconcile()
+    expect(r.sessions).toHaveLength(1)
+    expect(r.workspaces).toEqual([])
+  })
+
+  it('readTokenFile trims; missing file returns empty string', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-helm-tok-'))
+    try {
+      const f = join(dir, 'token')
+      writeFileSync(f, '  abc  \n')
+      expect(readTokenFile(f)).toBe('abc')
+      expect(readTokenFile(join(dir, 'missing'))).toBe('')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('default token file is ~/.agent-chatgpt-helm/token', () => {
+    expect(defaultHelmTokenFile()).toBe(join(process.env.HOME ?? '.', '.agent-chatgpt-helm', 'token'))
   })
 })

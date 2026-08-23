@@ -11,7 +11,17 @@ import type { WireMessage, NodeInfo, SessionInfo, WorkspaceInfo, PresenceClaim, 
 import { HandshakeClient, NODE_METHODS, HUB_METHODS, computeMac, generateNonce } from '@dsh-helm/protocol'
 import { RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
 
-export interface FakeNodeOptions {
+export /** 19 upstream-compatible tool names the fake node claims. */
+const FAKE_NODE_TOOLS: Array<{ name: string }> = [
+  'code_read_file', 'code_list_dir', 'code_find_file', 'code_search_for_pattern',
+  'code_get_symbols_overview', 'code_find_symbol', 'code_find_referencing_symbols',
+  'code_use_workspace',
+  'projects_list', 'supervisor_health', 'agents_list', 'workspaces_list',
+  'sessions_create', 'sessions_list', 'sessions_get', 'sessions_resume',
+  'sessions_prompt', 'sessions_wait', 'sessions_cancel',
+].map((name) => ({ name }))
+
+interface FakeNodeOptions {
   node: NodeInfo
   token: string
   schemaVersion: number
@@ -30,6 +40,8 @@ export class FakeNode {
   sessions: SessionInfo[]
   workspaces: WorkspaceInfo[]
   failMethods: Set<string>
+  /** Last mcp.call args received (for stripping assertions). */
+  lastMcpCall?: { tool: string; args: unknown }
   private logFn?: (line: string) => void
   private peer!: RpcPeer
   private handshake?: HandshakeClient
@@ -147,9 +159,11 @@ export class FakeNode {
     })
     this.peer.on(NODE_METHODS.MCP_CALL, async (p) => {
       const { tool, args } = p as { tool: string; args?: unknown }
+      this.lastMcpCall = { tool, args }
       this.maybeFail(`${NODE_METHODS.MCP_CALL}:${tool}`)
       return this.handleMcp(tool, args)
     })
+    this.peer.on(NODE_METHODS.TOOLS_LIST, () => ({ node_id: this.node.node_id, tools: FAKE_NODE_TOOLS }))
     this.peer.on(NODE_METHODS.PRESENCE_REPORT, (p) => p)
   }
 

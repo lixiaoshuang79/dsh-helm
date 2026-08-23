@@ -1,16 +1,40 @@
 /**
- * LocalDshBridge: MCP client to the local helm daemon.
+ * LocalHelmBackend: the node agent's interface to its local Helm MCP daemon.
  *
- * The node agent's "adapter" — reaches the local DSH through the helm
- * daemon's Streamable HTTP MCP endpoint (127.0.0.1:3457/mcp) with a Bearer
- * token, exactly like ChatGPT's tunnel does. This keeps the node agent out of
- * the daemon's unix-socket adapter protocol (loopback-only, unauthenticated)
- * and reuses the mature 19-tool MCP surface.
+ * The backend abstraction exists so the agent is transport-agnostic: the
+ * default `McpLocalHelmBackend` talks to the existing per-machine Helm daemon
+ * over standard MCP (initialize / tools/list / tools/call) at
+ * `http://127.0.0.1:3457/mcp` with a Bearer token read from the local token
+ * file (never argv, never logs). Tests use FakeBackend instead.
  *
- * Implemented with a minimal JSON-RPC client (initialize handshake +
- * session-id header management) — no SDK dependency, fully unit-testable
- * against a fake HTTP endpoint.
+ * If upstream later ships a native multi-adapter node extension, only this
+ * backend is swapped — hub protocol/registry/router are untouched.
  */
+
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+/** One tool as exposed by the local Helm MCP (schema snapshot / tools/list). */
+export interface LocalHelmTool {
+  name: string
+  description?: string
+  inputSchema?: Record<string, unknown>
+}
+
+export interface LocalHelmBackend {
+  /** MCP initialize; returns server info. */
+  connect(): Promise<{ name?: string; version?: string }>
+  /** tools/list — dynamic discovery of the local 19-tool surface. */
+  listTools(): Promise<LocalHelmTool[]>
+  /** tools/call — invoke one local Helm tool. */
+  callTool(name: string, args: unknown): Promise<McpToolCallResult>
+  /** Structured health probe of the local datapath. */
+  probeHealth(): Promise<{ ok: boolean; detail?: string }>
+  /** Structured metadata reconciliation (sessions/workspaces from local daemon). */
+  reconcile(): Promise<{ sessions: Array<Record<string, unknown>>; workspaces: Array<Record<string, unknown>> }>
+  disconnect(): void
+  readonly connected: boolean
+}
 
 export interface McpToolCallResult {
   /** Tool result content (MCP content blocks). */
@@ -21,15 +45,29 @@ export interface McpToolCallResult {
   [k: string]: unknown
 }
 
-export interface LocalDshBridgeOptions {
-  url: string
-  token: string
+/** Default token file of the local Helm daemon (0600, same file the tunnel uses). */
+export function defaultHelmTokenFile(): string {
+  return join(process.env.HOME ?? '.', '.agent-chatgpt-helm', 'token')
+}
+
+export interface McpLocalHelmBackendOptions {
+  /** Default http://127.0.0.1:3457/mcp */
+  url?: string
+  /** Bearer token; if omitted, read from the local token file (never argv/log). */
+  token?: string
+  /** Override token file path (tests). */
+  tokenFile?: string
   /** fetch impl for tests (defaults to globalThis.fetch). */
   fetchImpl?: typeof fetch
   log?: (line: string) => void
 }
 
-export class LocalDshBridge {
+/**
+ * Default backend: standard MCP client over fetch to the local Helm daemon.
+ * Minimal JSON-RPC (initialize handshake + session-id header management) —
+ * no SDK dependency, unit-testable against a fake HTTP endpoint.
+ */
+export class McpLocalHelmBackend implements LocalHelmBackend {
   private url: string
   private token: string
   private fetchImpl: typeof fetch
@@ -38,9 +76,9 @@ export class LocalDshBridge {
   private serverInfo?: { name?: string; version?: string }
   private nextId = 1
 
-  constructor(opts: LocalDshBridgeOptions) {
-    this.url = opts.url
-    this.token = opts.token
+  constructor(opts: McpLocalHelmBackendOptions = {}) {
+    this.url = opts.url ?? 'http://127.0.0.1:3457/mcp'
+    this.token = opts.token ?? readTokenFile(opts.tokenFile ?? defaultHelmTokenFile())
     this.fetchImpl = opts.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
     this.logFn = opts.log
   }
@@ -94,11 +132,42 @@ export class LocalDshBridge {
     return result
   }
 
-  /** Tools/list (for capability discovery). */
-  async listTools(): Promise<Array<{ name: string; description?: string }>> {
+  /** tools/list — dynamic discovery of the local 19-tool surface. */
+  async listTools(): Promise<LocalHelmTool[]> {
     const res = await this.post({ jsonrpc: '2.0', id: this.nextId++, method: 'tools/list', params: {} })
-    const body = res.body as { result?: { tools?: Array<{ name: string; description?: string }> } }
+    const body = res.body as { result?: { tools?: LocalHelmTool[] } }
     return body.result?.tools ?? []
+  }
+
+  /** Structured health probe of the local datapath. */
+  async probeHealth(): Promise<{ ok: boolean; detail?: string }> {
+    try {
+      const res = await this.callTool('supervisor_health', {})
+      const sc = (res.structuredContent ?? {}) as { status?: string; serena?: { connected?: boolean } }
+      const ok = sc.status === 'ok' || !!sc.serena?.connected
+      return { ok, detail: ok ? undefined : `local helm health: ${sc.status ?? 'unknown'}` }
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message.slice(0, 120) : String(err) }
+    }
+  }
+
+  /** Structured metadata reconciliation from the local daemon. */
+  async reconcile(): Promise<{ sessions: Array<Record<string, unknown>>; workspaces: Array<Record<string, unknown>> }> {
+    let sessions: Array<Record<string, unknown>> = []
+    let workspaces: Array<Record<string, unknown>> = []
+    try {
+      const list = (await this.callTool('sessions_list', {})).structuredContent ?? {}
+      sessions = (list['sessions'] as Array<Record<string, unknown>>) ?? []
+    } catch {
+      /* datapath issues reported via probeHealth */
+    }
+    try {
+      const list = (await this.callTool('workspaces_list', {})).structuredContent ?? {}
+      workspaces = (list['workspaces'] as Array<Record<string, unknown>>) ?? []
+    } catch {
+      /* tolerate */
+    }
+    return { sessions, workspaces }
   }
 
   disconnect(): void {
@@ -141,6 +210,15 @@ export class LocalDshBridge {
   }
 }
 
+/** Read the Bearer token from the local token file (trimmed). Missing file -> ''. */
+export function readTokenFile(path: string): string {
+  try {
+    return readFileSync(path, 'utf8').trim()
+  } catch {
+    return ''
+  }
+}
+
 function parseSseJson(text: string): unknown {
   for (const line of text.split('\n')) {
     const m = /^data:\s*(.*)$/.exec(line.trim())
@@ -153,20 +231,4 @@ function parseSseJson(text: string): unknown {
     }
   }
   return {}
-}
-
-/** Session info adapter: 19-tool daemon -> node AgentAdapter semantics. */
-export interface LocalSessionInfo {
-  session_id?: string
-  title?: string
-  status?: string
-  [k: string]: unknown
-}
-
-export interface LocalWorkspaceInfo {
-  workspace_id?: string
-  id?: string
-  path?: string
-  title?: string
-  [k: string]: unknown
 }

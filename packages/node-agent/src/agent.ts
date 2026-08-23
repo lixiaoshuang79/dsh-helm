@@ -5,9 +5,9 @@
  * - dial OUT to the hub (ws:// loopback/test, wss:// production),
  * - HMAC handshake (client side),
  * - after welcome: register node metadata, reconcile sessions/workspaces,
- * - periodic heartbeat (with health report from the local bridge probe),
- * - serve hub-initiated RPCs (health/listWorkspaces/.../mcp.call) mapped onto
- *   the local DSH bridge,
+ * - periodic heartbeat (with health report from the local backend probe),
+ * - serve hub-initiated RPCs (health/tools.list/tools.call/...) mapped onto
+ *   the LocalHelmBackend (default: McpLocalHelmBackend -> local Helm MCP),
  * - reconnect with exponential backoff + jitter; full re-register + reconcile
  *   after every reconnect (no partial state),
  * - expose presence reports to the hub (delegated to presence providers).
@@ -16,13 +16,13 @@
 import type { WireMessage, NodeInfo, NodeStatus, HealthReport, SessionInfo, WorkspaceInfo, PresenceClaim } from '@dsh-helm/protocol'
 import { HandshakeClient, NODE_METHODS, HUB_METHODS, RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_NODE_LEASE_MS, RECONNECT_BACKOFF_BASE_MS, RECONNECT_BACKOFF_MAX_MS } from '@dsh-helm/protocol'
-import { LocalDshBridge } from './bridge.js'
+import type { LocalHelmBackend } from './bridge.js'
 import type { NodeAgentConfig } from './config.js'
 
 export interface NodeAgentOptions {
   config: NodeAgentConfig
-  /** Bridge to the local helm daemon. */
-  bridge: LocalDshBridge
+  /** Backend to the local helm daemon (default McpLocalHelmBackend; FakeBackend in tests). */
+  backend: LocalHelmBackend
   /** WebSocket factory (defaults to global WebSocket; injectable for tests). */
   wsFactory?: (url: string) => WebSocketLike
   /** Presence provider hook: returns the current claim or undefined. */
@@ -48,7 +48,7 @@ type AgentState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'stoppe
 
 export class HelmNodeAgent {
   private cfg: NodeAgentConfig
-  private bridge: LocalDshBridge
+  private backend: LocalHelmBackend
   private wsFactory: (url: string) => WebSocketLike
   private presenceProvider?: () => Promise<PresenceClaim | undefined>
   private logFn?: (line: string) => void
@@ -72,7 +72,7 @@ export class HelmNodeAgent {
 
   constructor(opts: NodeAgentOptions) {
     this.cfg = opts.config
-    this.bridge = opts.bridge
+    this.backend = opts.backend
     this.wsFactory = opts.wsFactory ?? ((url) => new WebSocket(url) as unknown as WebSocketLike)
     this.presenceProvider = opts.presenceProvider
     this.logFn = opts.log
@@ -235,33 +235,20 @@ export class HelmNodeAgent {
   }
 
   private async collectLocalCatalog(): Promise<{ sessions: SessionInfo[]; workspaces: WorkspaceInfo[] }> {
-    let sessions: SessionInfo[] = []
-    let workspaces: WorkspaceInfo[] = []
-    try {
-      const list = (await this.bridge.callTool('sessions_list', {})).structuredContent ?? {}
-      const items = (list['sessions'] as Array<Record<string, unknown>>) ?? []
-      sessions = items.map((s) => ({
-        native_session_id: String(s.session_id ?? ''),
-        title: s.title ? String(s.title) : undefined,
-        status: (String(s.status ?? 'unknown') as SessionInfo['status']),
-        live: Boolean((s as { live?: boolean }).live),
-        updated_at: s.updated_at ? String(s.updated_at) : undefined,
-        workspace_id: s.workspace_id ? String(s.workspace_id) : undefined,
-      }))
-    } catch {
-      // health probe will report datapath issues
-    }
-    try {
-      const list = (await this.bridge.callTool('workspaces_list', {})).structuredContent ?? {}
-      const items = (list['workspaces'] as Array<Record<string, unknown>>) ?? []
-      workspaces = items.map((w) => ({
-        native_workspace_id: String(w.workspace_id ?? w.id ?? ''),
-        path: String(w.path ?? ''),
-        title: w.title ? String(w.title) : undefined,
-      }))
-    } catch {
-      /* tolerate */
-    }
+    const { sessions: rawSessions, workspaces: rawWorkspaces } = await this.backend.reconcile()
+    const sessions: SessionInfo[] = rawSessions.map((s) => ({
+      native_session_id: String(s.session_id ?? s.native_session_id ?? ''),
+      title: s.title ? String(s.title) : undefined,
+      status: (String(s.status ?? 'unknown') as SessionInfo['status']),
+      live: Boolean((s as { live?: boolean }).live),
+      updated_at: s.updated_at ? String(s.updated_at) : undefined,
+      workspace_id: s.workspace_id ? String(s.workspace_id) : undefined,
+    }))
+    const workspaces: WorkspaceInfo[] = rawWorkspaces.map((w) => ({
+      native_workspace_id: String(w.workspace_id ?? w.id ?? w.native_workspace_id ?? ''),
+      path: String(w.path ?? ''),
+      title: w.title ? String(w.title) : undefined,
+    }))
     return { sessions, workspaces }
   }
 
@@ -301,16 +288,16 @@ export class HelmNodeAgent {
     if (!this.peer) return
     this.peer.on(NODE_METHODS.HEALTH, async () => this.healthPayload())
     this.peer.on(NODE_METHODS.LIST_WORKSPACES, async () => {
-      const res = await this.bridge.callTool('workspaces_list', {})
+      const res = await this.backend.callTool('workspaces_list', {})
       return res.structuredContent ?? res.content ?? []
     })
     this.peer.on(NODE_METHODS.LIST_SESSIONS, async () => {
-      const res = await this.bridge.callTool('sessions_list', {})
+      const res = await this.backend.callTool('sessions_list', {})
       return res.structuredContent ?? res.content ?? []
     })
     this.peer.on(NODE_METHODS.CREATE_SESSION, async (p) => {
       const params = p as { workspace?: string; title?: string; initial_message?: string }
-      const res = await this.bridge.callTool('sessions_create', {
+      const res = await this.backend.callTool('sessions_create', {
         workspace: params.workspace,
         title: params.title,
         initial_message: params.initial_message,
@@ -319,30 +306,35 @@ export class HelmNodeAgent {
     })
     this.peer.on(NODE_METHODS.GET_SESSION, async (p) => {
       const { session_id } = p as { session_id: string }
-      const res = await this.bridge.callTool('sessions_get', { session_id })
+      const res = await this.backend.callTool('sessions_get', { session_id })
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.RESUME_SESSION, async (p) => {
       const { session_id } = p as { session_id: string }
-      const res = await this.bridge.callTool('sessions_resume', { session_id })
+      const res = await this.backend.callTool('sessions_resume', { session_id })
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.PROMPT, async (p) => {
       const { session_id, message } = p as { session_id: string; message: string }
-      const res = await this.bridge.callTool('sessions_prompt', { session_id, message })
+      const res = await this.backend.callTool('sessions_prompt', { session_id, message })
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.CANCEL, async (p) => {
       const { session_id } = p as { session_id: string }
-      const res = await this.bridge.callTool('sessions_cancel', { session_id })
+      const res = await this.backend.callTool('sessions_cancel', { session_id })
       return res.structuredContent ?? res.content ?? {}
     })
     // Generic passthrough: hub routes any MCP tool here.
     this.peer.on(NODE_METHODS.MCP_CALL, async (p) => {
       const { tool, args } = p as { tool: string; args?: unknown }
-      const res = await this.bridge.callTool(tool, args ?? {})
+      const res = await this.backend.callTool(tool, args ?? {})
       // Surface structured content to the hub (fall back to content blocks).
       return res.structuredContent ?? (res.content ? { content: res.content } : res)
+    })
+    // Generic capability discovery: the hub can list this node's tools.
+    this.peer.on(NODE_METHODS.TOOLS_LIST, async () => {
+      const tools = await this.backend.listTools()
+      return { node_id: this.cfg.node_id, tools }
     })
     this.peer.on(NODE_METHODS.PRESENCE_REPORT, async (p) => {
       this.log(`presence report: ${JSON.stringify(p).slice(0, 120)}`)
@@ -364,7 +356,7 @@ export class HelmNodeAgent {
     const now = new Date().toISOString()
     this.health.channel = { status: 'ok', checked_at: now }
     try {
-      const res = await this.bridge.callTool('supervisor_health', {})
+      const res = await this.backend.callTool('supervisor_health', {})
       const sc = (res.structuredContent ?? {}) as {
         status?: string
         serena?: { connected?: boolean }

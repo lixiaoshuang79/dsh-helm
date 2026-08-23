@@ -9,7 +9,8 @@
 import { describe, expect, it } from 'vitest'
 import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceRegistry } from '../../store/src/index.js'
 import { ControlPlane, HubConnection } from '../../hub/src/index.js'
-import { HelmNodeAgent, LocalDshBridge } from '../src/index.js'
+import { HelmNodeAgent } from '../src/index.js'
+import { FakeBackend } from './backend-fixtures.js'
 import type { WireMessage, NodeInfo } from '../../protocol/src/index.js'
 import { HandshakeServer } from '../../protocol/src/index.js'
 
@@ -41,7 +42,7 @@ interface Rig {
   nodes: NodeRegistry
   cp: ControlPlane
   conns: Map<string, HubConnection>
-  bridge: LocalDshBridge
+  backend: FakeBackend
   agent: HelmNodeAgent
   hubSocket: FakeHubSocket
   simulateServerClose(): void
@@ -60,17 +61,10 @@ function buildRig(heartbeatMs = 15_000, leaseMs = 45_000): Rig {
     defaultNodeId: 'n-agent', tokenLookup: (id) => (id === 'n-agent' ? 'tok' : undefined),
     connections: conns, log: () => {},
   })
-  const fetchImpl = async (_url: string, init: { body?: string }) => {
-    const body = JSON.parse(init.body ?? '{}')
-    let result: unknown
-    if (body.method === 'initialize') result = { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake' } }
-    else if (body.method === 'tools/call' && body.params?.name === 'sessions_list') result = { structuredContent: { sessions: [{ session_id: 's-r1', status: 'idle', live: false }] } }
-    else if (body.method === 'tools/call' && body.params?.name === 'workspaces_list') result = { structuredContent: { workspaces: [] } }
-    else if (body.method === 'tools/call') result = { structuredContent: { ok: true } }
-    else result = {}
-    return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200, headers: { 'content-type': 'application/json' } })
-  }
-  const bridge = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 't', fetchImpl: fetchImpl as unknown as typeof fetch })
+  const backend = new FakeBackend({
+    sessions: [{ session_id: 's-r1', status: 'idle', live: false }],
+    workspaces: [],
+  })
   const hubSocket = new FakeHubSocket()
   const agent = new HelmNodeAgent({
     config: {
@@ -78,7 +72,7 @@ function buildRig(heartbeatMs = 15_000, leaseMs = 45_000): Rig {
       local_mcp_url: 'http://127.0.0.1:3457/mcp', local_mcp_token: 't',
       display_name: 'a', local_probe_ms: 10_000, reconcile_ms: 10_000,
     },
-    bridge, wsFactory: () => hubSocket, heartbeatMs, leaseMs, log: () => {},
+    backend, wsFactory: () => hubSocket, heartbeatMs, leaseMs, log: () => {},
   })
   // Wire hub side: a fresh HubConnection per agent connect attempt
   let conn: HubConnection | undefined
@@ -95,7 +89,7 @@ function buildRig(heartbeatMs = 15_000, leaseMs = 45_000): Rig {
     conn = undefined
     hubSocket.onclose?.()
   }
-  return { store, nodes, cp, conns, bridge, agent, hubSocket, simulateServerClose }
+  return { store, nodes, cp, conns, backend, agent, hubSocket, simulateServerClose }
 }
 
 const settle = (ms = 100) => new Promise((r) => setTimeout(r, ms))

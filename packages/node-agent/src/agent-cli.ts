@@ -11,7 +11,7 @@
 
 import { loadConfig } from './config.js'
 import { HelmNodeAgent } from './agent.js'
-import { LocalDshBridge } from './bridge.js'
+import { McpLocalHelmBackend } from './bridge.js'
 import { ManualPresenceProvider, CompositePresenceProvider, DesktopSidecarPresenceProvider, PresenceListener } from '@dsh-helm/presence'
 
 export interface AgentCliOptions {
@@ -44,7 +44,9 @@ export function runAgent(opts: AgentCliOptions, log: (l: string) => void = conso
   if (process.env.DSH_HELM_MCP_URL) cfg.local_mcp_url = process.env.DSH_HELM_MCP_URL
   if (process.env.DSH_HELM_MCP_TOKEN) cfg.local_mcp_token = process.env.DSH_HELM_MCP_TOKEN
 
-  const bridge = new LocalDshBridge({ url: cfg.local_mcp_url, token: cfg.local_mcp_token, log })
+  // Default backend: local Helm MCP. Token read from ~/.agent-chatgpt-helm/token
+  // when node.json has no explicit local_mcp_token — never argv, never logs.
+  const backend = new McpLocalHelmBackend({ url: cfg.local_mcp_url, token: cfg.local_mcp_token || undefined, log })
 
   // Presence chain: manual pin > desktop sidecar (macOS) > browser listener.
   let listener: PresenceListener | undefined
@@ -60,7 +62,7 @@ export function runAgent(opts: AgentCliOptions, log: (l: string) => void = conso
 
   const agent = new HelmNodeAgent({
     config: cfg,
-    bridge,
+    backend,
     presenceProvider: presenceProvider as never,
     log: opts.logLines ? log : () => {},
   })

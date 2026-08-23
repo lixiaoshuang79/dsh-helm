@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach } from 'vitest'
 import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceRegistry } from '../../store/src/index.js'
 import { ControlPlane, HubConnection } from '../../hub/src/index.js'
-import { HelmNodeAgent, LocalDshBridge, type WebSocketLike } from '../src/index.js'
+import { HelmNodeAgent, type WebSocketLike } from '../src/index.js'
+import { FakeBackend } from './backend-fixtures.js'
 import type { WireMessage, NodeInfo } from '../../protocol/src/index.js'
 
 /**
@@ -46,42 +47,11 @@ class FakeWebSocket implements WebSocketLike {
 }
 
 /** Fake local daemon with controllable behavior. */
-function fakeDaemon(opts: { failHealth?: boolean } = {}) {
-  const fetchImpl = async (_url: string, init: { body?: string }) => {
-    const body = JSON.parse(init.body ?? '{}')
-    let result: unknown
-    if (body.method === 'initialize') {
-      result = { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'helm-daemon', version: '0.1.1' } }
-    } else if (body.method === 'tools/call') {
-      const name = body.params.name
-      if (name === 'supervisor_health') {
-        if (opts.failHealth) throw new Error('ECONNREFUSED')
-        result = { structuredContent: { status: 'ok', serena: { connected: true }, adapters: [{ id: 'dsh', health: 'ok' }] } }
-      } else if (name === 'sessions_list') {
-        result = { structuredContent: { sessions: [{ session_id: 's-local', title: 't', status: 'idle', live: false }] } }
-      } else if (name === 'workspaces_list') {
-        result = { structuredContent: { workspaces: [{ workspace_id: 'w-local', path: '/Users/me/proj' }] } }
-      } else if (name === 'sessions_prompt') {
-        result = { structuredContent: { ok: true, reply: 'processed by local daemon' } }
-      } else {
-        result = { structuredContent: { ok: true } }
-      }
-    } else {
-      result = {}
-    }
-    return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), {
-      status: 200,
-      headers: { 'content-type': 'application/json' },
-    })
-  }
-  return { fetchImpl: fetchImpl as unknown as typeof fetch }
-}
-
 interface Rig {
   store: DshHelmStore
   cp: ControlPlane
   conns: Map<string, HubConnection>
-  bridge: LocalDshBridge
+  backend: FakeBackend
   agent: HelmNodeAgent
   socket: FakeWebSocket
   nodes: NodeRegistry
@@ -111,8 +81,12 @@ function buildRig(opts: { failHealth?: boolean } = {}): Rig {
     connections: conns,
     log: () => {},
   })
-  const { fetchImpl } = fakeDaemon(opts)
-  const bridge = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'local-tok', fetchImpl })
+  const backend = new FakeBackend({
+    sessions: [{ session_id: 's-local', title: 't', status: 'idle', live: false }],
+    workspaces: [{ workspace_id: 'w-local', path: '/Users/me/proj' }],
+    failTools: opts.failHealth ? new Set(['supervisor_health']) : undefined,
+    overrides: opts.failHealth ? undefined : { sessions_prompt: { ok: true, reply: 'processed by local daemon' } },
+  })
   const socket = new FakeWebSocket()
   const agent = new HelmNodeAgent({
     config: {
@@ -125,13 +99,13 @@ function buildRig(opts: { failHealth?: boolean } = {}): Rig {
       local_probe_ms: 10_000,
       reconcile_ms: 10_000,
     },
-    bridge,
+    backend,
     wsFactory: () => socket,
     heartbeatMs: 15_000,
     leaseMs: 45_000,
     log: () => {},
   })
-  return { store, cp, conns, bridge, agent, socket, nodes, sessions, workspaces }
+  return { store, cp, conns, backend, agent, socket, nodes, sessions, workspaces }
 }
 
 async function settle(ms = 50): Promise<void> {
@@ -234,8 +208,7 @@ describe('HelmNodeAgent <-> hub integration', () => {
       connections: conns,
       log: () => {},
     })
-    const { fetchImpl } = fakeDaemon()
-    const bridge = new LocalDshBridge({ url: 'http://127.0.0.1:3457/mcp', token: 'local-tok', fetchImpl })
+    const backend = new FakeBackend()
     const socket = new FakeWebSocket()
     const agent = new HelmNodeAgent({
       config: {
@@ -248,7 +221,7 @@ describe('HelmNodeAgent <-> hub integration', () => {
         local_probe_ms: 10_000,
         reconcile_ms: 10_000,
       },
-      bridge,
+      backend,
       wsFactory: () => socket,
       log: () => {},
     })

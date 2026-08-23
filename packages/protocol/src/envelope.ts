@@ -123,6 +123,8 @@ export const NODE_METHODS = {
   CANCEL: 'cancel',
   /** Generic passthrough of an MCP tool call to the local helm daemon. */
   MCP_CALL: 'mcp.call',
+  /** Generic capability discovery: node's local tools/list. */
+  TOOLS_LIST: 'tools.list',
   /** Presence provider report. */
   PRESENCE_REPORT: 'presence.report',
   /** Session/workspace metadata reconcile payload (after (re)register). */
