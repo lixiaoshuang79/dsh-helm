@@ -94,6 +94,21 @@ export class ControlPlane {
     return this.opts.hubId
   }
 
+  /** Presence registry (exposed for control-plane tools). */
+  presenceRegistry(): PresenceRegistry {
+    return this.opts.presence
+  }
+
+  /** Session catalog (exposed for control-plane tools). */
+  sessionCatalog(): SessionCatalog {
+    return this.opts.sessions
+  }
+
+  /** Workspace catalog (exposed for control-plane tools). */
+  workspaceCatalog(): WorkspaceCatalog {
+    return this.opts.workspaces
+  }
+
   get schemaVersion(): number {
     return this.opts.schemaVersion
   }
