@@ -44,7 +44,7 @@ ssh -N -L 3470:127.0.0.1:3470 <user>@<hub-机器>        # 新机器上执行
 ### 路径 A：clone 仓库（当前 monorepo 未发布，推荐）
 
 ```bash
-git clone <dsh-helm 仓库地址> ~/deepseek/dsh-helm && cd ~/deepseek/dsh-helm
+git clone <dsh-helm 仓库地址> ~/dsh-helm && cd ~/dsh-helm
 pnpm install
 pnpm build        # tsc -b packages/*/tsconfig.json，产物在 packages/*/lib/
 # 安装 bin 到 PATH（可选，方便后续命令）
