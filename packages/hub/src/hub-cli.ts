@@ -22,6 +22,9 @@ interface HubCliOptions {
   hubId: string
   defaultNodeId: string
   bind: string
+  /** Optional separate listen address for the (unauthenticated) MCP server;
+   *  defaults to `bind`. Keep loopback unless you know why not. */
+  mcpBind?: string
   heartbeatMs: number
   leaseMs: number
 }
@@ -51,6 +54,7 @@ export function parseHubArgs(argv: string[]): HubCliOptions {
       case '--hub-id': opts.hubId = next(); break
       case '--default-node': opts.defaultNodeId = next(); break
       case '--bind': opts.bind = next(); break
+      case '--mcp-bind': opts.mcpBind = next(); break
       case '--heartbeat-ms': opts.heartbeatMs = Number(next()); break
       case '--lease-ms': opts.leaseMs = Number(next()); break
       default: throw new Error(`unknown hub option: ${a}`)
@@ -132,7 +136,8 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
     res.writeHead(404)
     res.end()
   })
-  mcpHttp.listen(opts.mcpPort, opts.bind, () => log(`hub MCP listening on ${opts.bind}:${opts.mcpPort}`))
+  const mcpAddr = opts.mcpBind ?? opts.bind
+  mcpHttp.listen(opts.mcpPort, mcpAddr, () => log(`hub MCP listening on ${mcpAddr}:${opts.mcpPort}`))
   log(`hub mesh listening on ${opts.bind}:${opts.meshPort} (hubId=${opts.hubId})`)
   return { cp, mesh, mcp, mcpHttp, store }
 }
