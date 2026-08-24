@@ -45,9 +45,24 @@ export interface McpToolCallResult {
   [k: string]: unknown
 }
 
-/** Default token file of the local Helm daemon (0600, same file the tunnel uses). */
+/** Default token file of the local Helm daemon (0600, same file the tunnel uses).
+ *  agent-helm >=0.1.2 moved its runtime files to ~/.agent-helm/; probe the new
+ *  location first and fall back to the legacy ~/.agent-chatgpt-helm/ so both
+ *  plugin generations on a dual-machine control plane keep working. */
 export function defaultHelmTokenFile(): string {
-  return join(process.env.HOME ?? '.', '.agent-chatgpt-helm', 'token')
+  const home = process.env.HOME ?? '.'
+  const candidates = [
+    join(home, '.agent-helm', 'token'),
+    join(home, '.agent-chatgpt-helm', 'token'),
+  ]
+  for (const c of candidates) {
+    try {
+      if (readFileSync(c, 'utf8').trim().length > 0) return c
+    } catch {
+      /* try next */
+    }
+  }
+  return candidates[0]!
 }
 
 export interface McpLocalHelmBackendOptions {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { McpLocalHelmBackend, readTokenFile, defaultHelmTokenFile } from '../src/bridge.js'
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -161,7 +161,26 @@ describe('McpLocalHelmBackend (LocalHelmBackend default)', () => {
     }
   })
 
-  it('default token file is ~/.agent-chatgpt-helm/token', () => {
-    expect(defaultHelmTokenFile()).toBe(join(process.env.HOME ?? '.', '.agent-chatgpt-helm', 'token'))
+  it('default token file prefers ~/.agent-helm/token (agent-helm >=0.1.2), falls back to legacy path', () => {
+    const realHome = process.env.HOME
+    const fakeHome = mkdtempSync(join(tmpdir(), 'dsh-helm-token-'))
+    const legacy = join(fakeHome, '.agent-chatgpt-helm', 'token')
+    const modern = join(fakeHome, '.agent-helm', 'token')
+    try {
+      process.env.HOME = fakeHome
+      // Neither exists: returns modern path as default candidate.
+      expect(defaultHelmTokenFile()).toBe(modern)
+      // Legacy exists only: returns legacy path.
+      mkdirSync(join(fakeHome, '.agent-chatgpt-helm'), { recursive: true })
+      writeFileSync(legacy, 'legacy-token\n', { mode: 0o600 })
+      expect(defaultHelmTokenFile()).toBe(legacy)
+      // Both exist: prefers modern path.
+      mkdirSync(join(fakeHome, '.agent-helm'), { recursive: true })
+      writeFileSync(modern, 'modern-token\n', { mode: 0o600 })
+      expect(defaultHelmTokenFile()).toBe(modern)
+    } finally {
+      process.env.HOME = realHome
+      rmSync(fakeHome, { recursive: true, force: true })
+    }
   })
 })
