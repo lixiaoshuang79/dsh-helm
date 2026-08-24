@@ -16,7 +16,7 @@
     "clean": "rm -rf packages/*/lib",
     "lint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"tests/**/*.ts\"",
     "validate": "npm run typecheck && npm run lint && npm run test",
-    "prepare": "pnpm build"
+    "prepare": "pnpm -r --workspace-concurrency=1 build"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
