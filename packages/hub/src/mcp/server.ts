@@ -204,7 +204,14 @@ export class HubMcpServer {
     // strip control params before forwarding
     const { target_node: _t, ...forwardArgs } = args
     const result = await this.cp.forward(route, def.name, forwardArgs, callId, def.danger)
-    return this.text({ ...(result as Record<string, unknown>), _route: route.decision })
+    // Attach human-readable serving node so callers (ChatGPT) can tell which
+    // DSH actually answered (node_id UUIDs are not enough).
+    const names = new Map(this.cp.nodeCatalog().map(({ node }) => [node.node_id, node.display_name]))
+    const routeMeta = {
+      ...route.decision,
+      node_name: names.get(route.decision.node_id) ?? route.decision.node_id.slice(0, 8),
+    }
+    return this.text({ ...(result as Record<string, unknown>), _route: routeMeta })
   }
 
   private async handlePresence(def: ToolDef, args: Record<string, unknown>): Promise<McpCallResult> {
