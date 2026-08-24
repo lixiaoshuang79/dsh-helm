@@ -11,7 +11,7 @@
  *   tunnel   -> optional entry tunnel (hub node only, from node heartbeat)
  */
 
-import type { HealthReport, HealthStatus, LayerHealth } from '@dsh-helm/protocol'
+import type { HealthStatus, LayerHealth } from '@dsh-helm/protocol'
 import { DEFAULT_NODE_LEASE_MS } from '@dsh-helm/protocol'
 import type { NodeRegistry, StoredNode } from '@dsh-helm/store'
 

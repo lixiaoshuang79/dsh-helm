@@ -315,7 +315,7 @@ export class HelmNodeAgent {
     t.unref?.()
   }
 
-    private lastProbeAt = 0
+  private lastProbeAt = 0
 
   private async heartbeat(): Promise<void> {
     if (!this.peer) return
