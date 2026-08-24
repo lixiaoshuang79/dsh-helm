@@ -37,7 +37,7 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
                         │          （对话里选连接器，19 工具 MCP 面）      │
                         └──────────────────────┬───────────────────────┘
                                                │ OpenAI Secure MCP Tunnel
-                                               │ （控制面 api.openai.com，HTTPS_PROXY 7897）
+                                               │ （控制面 api.openai.com，经本地 HTTPS 代理）
                                                ▼
                         ┌──────────────────────────────────────────────┐
                         │     tunnel-client（仅 Hub 入口节点，3458 健康）  │

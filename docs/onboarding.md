@@ -279,7 +279,7 @@ presence 影响**未显式指定目标**的调用路由（第 4 优先级）。�
 2. **防火墙**：agent 只需**出站**（拨号 hub 3470）；hub 机器按 §1 方式开放入站（SSH 隧道只开 22；WSS 反代只开 443）；**不要把 3470/3471 直接暴露公网**（mesh 默认 ws 明文、MCP 无鉴权）。
 3. **凭据落盘**：`node.json`、`~/.agent-chatgpt-helm/token`、`~/.dsh/.credentials.yaml` 全部 0600，且不在 git 里（`.gitignore` 已排除 `*.sqlite3` 与凭据）；不要把它们同步进云盘。
 4. **怀疑泄露**：`dsh-helm rotate-token` 换新 token，同时更新 hub 侧 `DSH_HELM_TOKEN`；daemon token 泄露则删 `~/.agent-chatgpt-helm/token` 让 daemon 重建。
-5. **DSH web（3080）无认证**：只绑 loopback + trustedHosts 围栏——不要在公网反代 3080；本机浏览器/恶意扩展仍能碰它（威胁模型 T12）。本地代理同理：若新机器还要跑 ChatGPT 隧道，`tunnel-client` 必须带 `HTTPS_PROXY=http://127.0.0.1:7897`，凭据从 `~/.dsh/.credentials.yaml` 以 `env:` 语法注入。
+5. **DSH web（3080）无认证**：只绑 loopback + trustedHosts 围栏——不要在公网反代 3080；本机浏览器/恶意扩展仍能碰它（威胁模型 T12）。本地代理同理：若新机器还要跑 ChatGPT 隧道，`tunnel-client` 必须带 `HTTPS_PROXY=<local-proxy>`（出网代理），凭据从 `~/.dsh/.credentials.yaml` 以 `env:` 语法注入。
 
 ## 10. 常见问题排查表
 

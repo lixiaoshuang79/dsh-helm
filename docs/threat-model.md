@@ -60,7 +60,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 ### 2.6 上游与单机套件（事实）
 
 - 上游固定：`@beforewave/agent-chatgpt-helm@0.1.1`（core）+ `@beforewave/dsh-chatgpt-helm@0.1.1`（plugin）npm tarball 精确 pin（`upstream-helm/PIN.md` 记录 gitHead；源码仓库 private/404，tarball 是唯一权威）；dsh-helm 各包对 `@modelcontextprotocol/sdk` 用精确版 `1.30.0`。
-- 单机套件（`../connector/`，兼容基线）：tunnel-client 以 `CONTROL_PLANE_TUNNEL_ID` / `CONTROL_PLANE_API_KEY` 连 `api.openai.com`（**必须经 `HTTPS_PROXY=http://127.0.0.1:7897`**，无代理控制面轮询全超时）；`dsh-web-watchdog.sh`（10s 探 3080+3457，双失败≥3 次才受控重启，PID 锁单实例）、`tunnel-client-keepalive.sh`（15s 探 3458+3457 + daemon PID 比对，重建隧道，PID 锁）；插件侧 patch `tunnelEnabled:false`（daemon 不自管隧道，keepalive 独占）。DSH web 3080 无认证，靠 loopback/trustedHosts 围栏。
+- 单机套件（`../connector/`，兼容基线）：tunnel-client 以 `CONTROL_PLANE_TUNNEL_ID` / `CONTROL_PLANE_API_KEY` 连 `api.openai.com`（**必须经本地 HTTPS 代理 `HTTPS_PROXY=<local-proxy>`**，无代理控制面轮询全超时）；`dsh-web-watchdog.sh`（10s 探 3080+3457，双失败≥3 次才受控重启，PID 锁单实例）、`tunnel-client-keepalive.sh`（15s 探 3458+3457 + daemon PID 比对，重建隧道，PID 锁）；插件侧 patch `tunnelEnabled:false`（daemon 不自管隧道，keepalive 独占）。DSH web 3080 无认证，靠 loopback/trustedHosts 围栏。
 
 ### 2.7 生命周期与健康分层（事实）
 
@@ -199,13 +199,13 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 - **缓解**：**设计红线**——wire（`types.ts`：`The wire carries metadata only — never DSH conversation bodies`）与存储（`db.ts`：`It never stores DSH conversation bodies`）都只承载元数据；`SessionInfo`/`WorkspaceInfo` 只有 native_id/title/status/path/计数；会话正文只在**执行路径**流动（`mcp.call` → 节点本地 daemon → 本地 DSH），hub 转发时不落盘；workspace path 被明确定义为"属性而非身份"（跨 OS 同名路径是两个 workspace，`resolve` 歧义返回 undefined 不猜测）；audit/route_log 明确"无 prompt 正文无密钥"（`audit.ts`）。
 - **残余风险**：会话 **title** 由用户/模型命名，可能含敏感信息，且会进入 catalog/audit 聚合面；`sessions_get`/`sessions_prompt` 的**结果**（正文）经 mesh 明文（未上 WSS 时）与 hub 转发路径返回给调用方——hub 不落盘但**经过** hub（T1 与 T15 关联）；`code_*` 工具读到的**文件内容**同样经 hub 转发（hub 是透传者，可被嗅探/记录于网络层）。
 
-### T15 代理 / 隧道（api.openai.com 经 7897 代理）信任链
+### T15 代理 / 隧道（api.openai.com 经本地代理）信任链
 
-- **威胁描述**：tunnel-client 控制面轮询 `api.openai.com` 必须经本地代理 `127.0.0.1:7897`（Clash）；该代理是本地进程，可观测/篡改隧道控制面流量；代理挂了隧道整体断连。
+- **威胁描述**：tunnel-client 控制面轮询 `api.openai.com` 必须经本地代理（如 Clash）；该代理是本地进程，可观测/篡改隧道控制面流量；代理挂了隧道整体断连。
 - **攻击场景**：代理软件被替换/被注入 → 可记录 `api.openai.com` 的轮询流量特征与（若安装 MITM 证书）控制面内容；代理进程被误杀/未启动 → `tunnel-client-manual.log` 刷 poller stopped，ChatGPT 侧连接器探测失败（本机已实测的故障模式）；`CONTROL_PLANE_API_KEY` 若出现在命令行参数中会被同机 `ps` 看到（现状用 `env:` 已避免）。
 - **影响**：① 代理被攻陷/恶意代理软件可读到 `CONTROL_PLANE_API_KEY` 的用途（env 注入避免 argv，但代理能看到 TLS 内的轮询目标与流量特征；若代理安装 MITM 证书可解密 api.openai.com 流量）；② 代理进程崩溃/未启动 → 控制面轮询全部超时 → ChatGPT 侧连接器探测失败（已实测的故障模式）；③ 隧道控制面凭据泄露 = 接管连接器入口。
-- **缓解**：**信任链分层**——ChatGPT→api.openai.com 走平台侧 TLS；api.openai.com→tunnel-client 走 TLS（代理默认只做 CONNECT 转发，不解密）；tunnel-client→本机 daemon 是 loopback（Bearer token 保护）；凭据 `CONTROL_PLANE_TUNNEL_ID`/`CONTROL_PLANE_API_KEY` 存 `~/.dsh/.credentials.yaml`（0600，不入库不进 git），keepalive 以 `env:` 语法注入进程环境（`tunnel-client-keepalive.sh` 从凭据文件读取并 export，`--control-plane.api-key env:CONTROL_PLANE_API_KEY`）——**token 不出现在 argv**；keepalive 的双重健康探针（3458 自身 + 3457 upstream）避免"隧道活着但 daemon 挂"的假健康；`HTTPS_PROXY` 可覆盖（`${HTTPS_PROXY:-http://127.0.0.1:7897}`），代理恢复后自动连通。
-- **残余风险**：本地代理是**信任单点**（其进程权限即隧道控制面权限；7897 不可用 = 连接器不可用）；api.openai.com 与 OpenAI 平台侧是外部信任边界（其密钥轮换、账号安全不在本项目控制内）；tunnel-client 与 daemon 之间（loopback 明文 HTTP）若本机有恶意进程可注入 MCP 调用（依赖 T10 的本机信任假设）。
+- **缓解**：**信任链分层**——ChatGPT→api.openai.com 走平台侧 TLS；api.openai.com→tunnel-client 走 TLS（代理默认只做 CONNECT 转发，不解密）；tunnel-client→本机 daemon 是 loopback（Bearer token 保护）；凭据 `CONTROL_PLANE_TUNNEL_ID`/`CONTROL_PLANE_API_KEY` 存 `~/.dsh/.credentials.yaml`（0600，不入库不进 git），keepalive 以 `env:` 语法注入进程环境（`tunnel-client-keepalive.sh` 从凭据文件读取并 export，`--control-plane.api-key env:CONTROL_PLANE_API_KEY`）——**token 不出现在 argv**；keepalive 的双重健康探针（3458 自身 + 3457 upstream）避免"隧道活着但 daemon 挂"的假健康；`HTTPS_PROXY` 可覆盖（`${HTTPS_PROXY:-<local-proxy>}`），代理恢复后自动连通。
+- **残余风险**：本地代理是**信任单点**（其进程权限即隧道控制面权限；代理不可用 = 连接器不可用）；api.openai.com 与 OpenAI 平台侧是外部信任边界（其密钥轮换、账号安全不在本项目控制内）；tunnel-client 与 daemon 之间（loopback 明文 HTTP）若本机有恶意进程可注入 MCP 调用（依赖 T10 的本机信任假设）。
 
 ## 4. 风险登记与已接受风险
 
@@ -238,7 +238,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 | hub token 表 | `DSH_HELM_TOKEN` 环境注入的安全 | 冒充任意节点 | v1 人工运维；建议 secrets 管理 |
 | hub MCP 3471 | 默认 loopback | 无鉴权指令面 | v1 无鉴权，**严禁暴露公网** |
 | 上游 npm 包 | registry 与 tarball 可信 | 供应链投毒 | 固定 0.1.1 + lockfile；无哈希背书 |
-| 本地代理 7897 | 代理进程可信 | 隧道控制面泄露/断连 | 接受（本机信任）；代理故障有自愈 |
+| 本地代理 | 代理进程可信 | 隧道控制面泄露/断连 | 接受（本机信任）；代理故障有自愈 |
 | 审计存储 | 本机文件不被篡改 | 取证失效 | DAO 就绪但**未接入执行路径**；无防篡改 |
 
 ## 5. 后续加固方向（建议，未实现）

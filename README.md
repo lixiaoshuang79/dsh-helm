@@ -97,6 +97,77 @@ dsh-helm agent                     # 前台（委派 dsh-helm-agent）
 
 > hub 的 token 通过 `DSH_HELM_TOKEN` 环境变量下发（`node_id=token,...`，见 `packages/hub/src/hub-cli.ts`）；生产建议接密钥管理。hub 默认只监听 `127.0.0.1`，WSS 需反向代理或 `DSH_HELM_BIND=0.0.0.0` + TLS。
 
+## ChatGPT / OpenAI 连接方式
+
+dsh-helm 与 ChatGPT 的接入有两条路径，按部署阶段选择：
+
+### A. 单机直连（推荐起步，等价原 connector）
+
+本机已有 helm daemon（`agent-chatgpt-helm`，监听 `127.0.0.1:3457/mcp`，Bearer token 在
+`~/.agent-chatgpt-helm/token`）时，hub 把**本机节点**当 local node，行为与单机
+connector 完全一致：
+
+```
+ChatGPT → hub MCP (3471) → router(default_local) → 本机 node agent
+       → 本机 helm daemon MCP (3457) → DSH
+```
+
+- 无需 `target_node`，无需 presence，单节点零配置收敛。
+- ChatGPT 侧工具面 = 19 个兼容工具，参数与 connector 完全一致。
+
+### B. Secure MCP Tunnel / 多节点（控制平面）
+
+```
+ChatGPT ──(OpenAI Secure MCP Tunnel，可选)──▶ hub MCP (3471)
+                                                │  路由（见「路由规则」）
+         ┌──────────────────────────────────────┴───────────────┐
+         ▼                                                     ▼
+  Node A（本机）                                         Node B（远程）
+  dsh-helm agent ──▶ 本机 daemon MCP 3457               dsh-helm agent ──▶ 本机 daemon MCP 3457
+```
+
+- 各节点 agent **只出站**连 hub mesh（3470，WSS 生产）；hub 不要求入站公网端口。
+- ChatGPT 侧仍只看到一个入口（hub MCP 3471）；多节点对 ChatGPT 透明。
+- 远程节点经 `code_use_workspace` 天然落到**该工作区所在机器**执行（workspace affinity）。
+
+### 本地节点 vs 隧道节点
+
+| | 本地节点 | 隧道/远程节点 |
+|---|---|---|
+| 连接 | agent → hub（loopback 或内网 WSS） | agent → hub（WSS，经内网/公网） |
+| 数据 | 本机 DSH 直接可达 | 节点自己的 DSH，与 hub 位置无关 |
+| presence | macOS sidecar 自动 | 手动声明 / 浏览器扩展 |
+
+## 平台支持
+
+| 平台 | hub | node agent | presence | 服务自启 |
+|---|---|---|---|---|
+| macOS | ✅ | ✅ | ✅ desktop sidecar（自动）+ 手动 | ✅ launchd（`install-service.sh`） |
+| Linux | ✅ | ✅ | ✅ 手动 | ✅ systemd（模板在 `@dsh-helm/platform`） |
+| Windows | ✅（Node ≥22.5） | ✅ | 🚧 脚手架（PowerShell 适配器待真机验证） | 🚧 Task Scheduler 模板（待真机验证） |
+
+> 核心代码零平台特定逻辑（launchd/osascript/PowerShell 全部隔离在 `packages/platform` 与 `packages/presence`），Windows/Linux 只需真机验证即可落地。
+
+## 故障恢复
+
+| 故障 | 检测 | 恢复 |
+|---|---|---|
+| 节点断线 | 15s 心跳丢失 ×3（45s 租约过期） | 节点标记 offline；`markOffline` 触发；重连后**全量 re-register + reconcile** |
+| agent 崩溃 | 15s watchdog（`dsh-helm-watchdog.sh`，单实例 PID 锁） | 进程级拉起（不越权碰 datapath） |
+| 网络抖动 | 指数退避重连（1s→30s + jitter） | 自动重连 + 重新注册/对账 |
+| 隧道代理挂 | 双重健康探针（3458 自身 + 3457 upstream） | keepalive 自动重建（仅 connector 套件） |
+| presence 过期 | 20s renew / 60s TTL / 手动 10min | 路由退回 default/owner；歧义窗口 15s 内不猜测 |
+| 审计损坏 | store WAL + busy_timeout | 只影响元数据，不碰会话正文 |
+
+## 当前限制（v0.1.0）
+
+- **真实双机冒烟未做**：自动化验证（含双 fake node 全协议端到端、170 tests）全绿；物理双机 WSS + 真实 DSH 的最终冒烟待两台机器（步骤见 `docs/onboarding.md`）。
+- **session handoff 未实现**：v1 协议明确定义接口并返回 `unsupported`（无 fake 无损迁移）。
+- **CLI 在线 RPC 命令待接**：`nodes`/`route-explain`/`presence`/`rotate-token` 依赖 hub RPC 面（下一里程碑）。
+- **Windows/Linux 真机验证待做**（见平台支持表）。
+- **WSS + TLS 生产化**：hub 默认 loopback；生产需反向代理或 `MeshServerOptions.server` 传 https server。
+- **token 管理**：当前 `DSH_HELM_TOKEN` 环境变量注入；生产建议接密钥管理/轮换。
+
 ## 开发
 
 ```bash
@@ -112,7 +183,7 @@ pnpm clean          # 清理 lib/
 
 ## 测试
 
-当前 **156 个测试用例**（22 个测试文件，vitest run 实测）：
+当前 **170 个测试用例**（23 个测试文件，vitest run 实测）：
 
 - **单元 143**：协议（HMAC 握手/信封/JSON-RPC）、store（db/注册表/presence/目录）、hub（路由矩阵/校验矩阵/MCP server/hub-cli/审计持久化/单节点兼容）、node-agent（桥/config/agent-cli/reconnect）、platform、presence、CLI。
 - **集成 13**：其中 **9 个双 fake node 全协议端到端**（`tests/integration/two-fake-nodes.test.ts`，内存握手→注册→心跳→对账→presence→路由转发，无真实 socket），另有 node-agent 桥集成 4 个。
@@ -124,7 +195,7 @@ pnpm test:integration           # 仅 tests/integration/
 
 ## 与单机 connector 的关系
 
-仓库同级 `../connector/`（dsh-chatgpt-connector 套件 worktree）是**单机兼容基线**：19 个 MCP 工具的名与参数在 hub 上原样保留，hub MCP 的 Streamable HTTP 形状（`initialize` → `tools/call`）与单机 daemon（3457）一致。本仓库把它升级为控制平面：
+[`lixiaoshuang79/dsh-chatgpt-connector`](https://github.com/lixiaoshuang79/dsh-chatgpt-connector) 是**单机兼容基线**（本仓库的前身）：19 个 MCP 工具的名与参数在 hub 上原样保留，hub MCP 的 Streamable HTTP 形状（`initialize` → `tools/call`）与单机 daemon（3457）一致。本仓库把它升级为控制平面：
 
 | | 单机 connector（../connector/） | dsh-helm（本仓库） |
 |---|---|---|
