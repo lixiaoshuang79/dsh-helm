@@ -13,7 +13,7 @@
 import { describe, expect, it } from 'vitest'
 import { SessionSummaryService } from '../src/summary.js'
 import { buildFixtureMessages, GROUND_TRUTH, fixtureStats, FIXTURE_KINDS, type FixtureKind, type FixtureMessage } from './fixtures/fidelity-fixtures.mjs'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -191,9 +191,14 @@ describe('2. 信息保真字段矩阵', () => {
       try {
         const sum = (await svc2.getSession({ session_id: SID })) as Record<string, unknown>
         const text = JSON.stringify(sum)
-        expect(text).not.toContain('sk-test-secret-12345')
-        expect(text).not.toContain('Bearer ')
+        // 不依赖模型的自律断言：credential pattern 全字段扫描（不只查具体假值）
+        expect(scanCredentialPatterns(text)).toEqual([])
         expect(sum.safety_sanitized).toBe(true)
+        // 摘要缓存文件同样不得含 pattern（落盘内容 = 已清洗摘要）
+        const cacheFiles = readdirSync(dir2).filter((f) => f.endsWith('.json'))
+        expect(cacheFiles.length).toBe(1)
+        const cacheText = readFileSync(join(dir2, cacheFiles[0]!), 'utf8')
+        expect(scanCredentialPatterns(cacheText)).toEqual([])
       } finally {
         rmSync(dir2, { recursive: true, force: true })
       }
@@ -202,6 +207,22 @@ describe('2. 信息保真字段矩阵', () => {
     }
   })
 })
+
+/** credential pattern 扫描（与 summary.ts 同一组正则；不依赖模型自律的硬断言）。 */
+const CREDENTIAL_PATTERNS: RegExp[] = [
+  /Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi,
+  /\b(?:api[_-]?key|access[_-]?key|token|password|passwd|secret|client[_-]?secret)\s*[:=]\s*[^\s,;"']{6,}/gi,
+  /\bsk-[A-Za-z0-9_-]{8,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+]
+function scanCredentialPatterns(s: string): string[] {
+  const hits: string[] = []
+  for (const re of CREDENTIAL_PATTERNS) {
+    re.lastIndex = 0
+    for (const m of s.matchAll(re)) hits.push(m[0]!)
+  }
+  return hits
+}
 
 /** 摘要文本是否包含任一子串。 */
 function sumTextContainAny(sum: Record<string, unknown>, subs: string[]): boolean {

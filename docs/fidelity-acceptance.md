@@ -186,6 +186,33 @@ seq 998 的模板指令"处理 sqlite 迁移"，**掩盖了窗口内 seq 985 的
 （+2）压过更近的"处理打包配置问题"（+1），且最近原文保留在 `last_user_message`。
 fixture 填充轮同步改为确认词形态（真实长会话近端形态），消除模板失真对判定的干扰。
 
+### 5.2 安全验收补充：credential boundary 与对照路径泄露（纠偏后如实记录）
+
+**背景**：high-risk full-history 对照回答（组B）复述了 fixture 中的测试假 secret
+（`API_KEY=sk-test-secret-12345`）。该值为**测试假值**（仅测试环境），但按安全纠偏要求
+不作为"可接受"依据；以下逐路径记录。
+
+| 路径 | 材料可见 secret | 评审回答复述 | 默认摘要包含/诱导复述 | 系统 redaction 边界 |
+|---|---|---|---|---|
+| 默认摘要（组A） | 否（入口清洗） | **否**（pattern 扫描 0 命中） | 否（自律断言，见下） | `safety_sanitized` 标志 + `sanitizeSecretLines` 覆盖全部摘要字段与 evidence 提取 |
+| 完整历史对照（组B） | **是**（fixture 原文，第 500 条） | **是**（`API_KEY=sk-test-secret-12345`，assign+sk-* 两类命中） | —（对照路径） | **输出层无 redaction（缺口）**：评审脚本落盘未清洗；完整历史本含原文，模型忠实复述 |
+
+**不依赖模型自律的硬断言**（fidelity-acceptance 新增，与 summary.ts 同一组正则）：
+1. 默认摘要 JSON 全字段（含 evidence/history_ref）credential pattern 扫描 = **0 命中**（三 fixture）；
+2. secret 移入窗口场景：默认 `getSession` 响应 JSON 扫描 = 0 命中，且 `safety_sanitized:true`；
+3. **摘要缓存文件**（落盘内容）pattern 扫描 = 0 命中（清洗发生在 buildSummary 输出，缓存不引入泄露）；
+4. 存档证据（bash 扫描 docs/fidelity-review/*.json 的 answer 字段）：仅
+   `high-risk.full-history` 命中（组B，对照预期）；**组A 三例全部 0 命中**。
+
+**定性**：
+- **默认摘要路径：安全闭环**。secret 出现即 FAIL/P0（现为 0 命中）——测试假值不改变判定标准。
+- **full-history 对照：安全不通过/泄露风险（对照路径）**。两层成因：①**预期风险**——对照组
+  材料按设计包含原文（远端事实可见性是对照的本意），模型忠实复述属保真行为；②**实现缺口**——
+  评审脚本输出落盘无 redaction（若存档需对外分发，应清洗或标注）。**该泄露不计入默认摘要
+  PASS**；后续增强：评审脚本落盘前对 credential pattern 做 redaction 或加 [REDACTED] 标注。
+- 结论维持 **CONDITIONAL PASS**（默认摘要路径安全闭环；对照组泄露风险 + DSH 0.1.1 协议级
+  完备性限制未闭环，均不满足 PASS 条件）。
+
 ## 6. 修复内容（保真验收驱动）
 
 1. **摘要窗口 2 → 20**（`SUMMARY_WINDOW=20`）：近端事实（测试结果/未确认/下一步）进入结构化提取。
