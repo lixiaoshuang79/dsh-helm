@@ -18,11 +18,11 @@ daemon 3457 → DSH   daemon 3457 → DSH   ……      （各节点本地 helm 
 
 - 每个节点跑 `dsh-helm agent`：**只出站**连 hub（mesh WS），向内桥接本机 helm daemon 的 MCP（`127.0.0.1:3457/mcp`）。
 - hub 是唯一入口：ChatGPT 经 hub MCP（3471）调用工具，hub 按路由策略转发到正确节点；节点数对 ChatGPT 透明。
-- 单机兼容：单节点且 `node_id == hub defaultNodeId` 时，行为与单机 daemon 完全一致。
+- 单机兼容：单节点且 `node_id == hub defaultNodeId` 时，路由与工具调用行为等价于单机 daemon（摘要/guard/steer 为上层增强，不影响既有调用语义）。
 
 ## 功能特性
 
-- **多节点注册与心跳**：节点身份 `node_id`（UUID）+ HMAC 挑战握手；15s 心跳、45s 租约；新版 agent 心跳超时自动重连（半开连接自愈）。
+- **多节点注册与心跳**：节点身份 `node_id`（UUID）+ HMAC 挑战握手；15s 心跳、45s 租约；新版 agent 心跳超时自动重连（半开连接检测重连）。
 - **五级路由**：`显式 target_node → session owner → workspace owner → 无歧义 presence → defaultNodeId 兜底`；destructive/write 操作目标不清晰时 **fail-closed** 拒绝（`route_confirmation_required`），绝不猜。
 - **转发可溯源**：每次转发结果附带 `_route.node_name`（display_name）标注执行节点；`route_explain` 预演不执行。
 - **MCP 工具面 19+5**：单机 daemon 的 19 个工具（`code_*`/`sessions_*`/`projects_list`/`supervisor_health` 等，snake_case 参数不变）原样保留，新增 `nodes_list`/`node_get`/`route_explain`/`presence_claim`/`presence_release`；所有可路由工具带可选 `target_node`。
@@ -114,8 +114,8 @@ Dashboard「新增 DSH 设备」→ 生成一次性配对码（10 分钟有效�
 
 ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦身与监控（兼容层，链路不变）：
 
-- **sessions_get 默认摘要**：默认只返回结构化摘要（`id/title/status/workspace/created_at/updated_at/last_message_summary/last_assistant_summary/token_estimate/continuation_available`，无 messages），实测大 session 响应 75KB → 1.2KB。摘要由 node agent 生成（只向 DSH 要最后 2 条消息），缓存于 `~/.dsh/helm/summaries/<session_id>.json`（60s TTL，写操作后失效）。
-- **完整历史按需取**：`include_messages=true`（可配 `max_messages` 默认 20、`before_seq` 翻页游标）返回完整消息；旧调用（不带参数）自动走摘要，行为不变。
+- **sessions_get 默认摘要**：默认只返回结构化摘要（`id/title/status/workspace/created_at/updated_at/last_message_summary/last_assistant_summary/current_goal/current_goal_seq/last_user_message/recent_evidence{commits,paths,errors,tests}/history_ref/safety_sanitized/token_estimate/continuation_available`，无 messages）。摘要由 node agent 生成：只向 DSH 要最后 20 条消息（`SUMMARY_WINDOW`），`current_goal` 取窗口内行动性最高的用户指令（附来源 seq），`recent_evidence` 为正则启发式提取，疑似凭据行在进入任何摘要字段前剔除（`safety_sanitized` 标记）。实测基线：早期大 session 响应 75KB → 1.2KB；信息保真验收 fixture（1000 条消息）约 107KB → 0.7KB，默认响应 <1KB。缓存于 `~/.dsh/helm/summaries/<session_id>.json`（60s TTL，写操作后失效）。
+- **完整历史按需取**：`include_messages=true`（可配 `max_messages`，默认 20）返回完整消息；`before_seq` 参数透传但 **DSH 0.1.1 未实现真实翻页**（探测实测：max_messages ≤100 且 beforeSeq 无效）——最近 100 条之外的历史当前不可达，`history_ref` 显式标注可达范围（`reachable_max_messages:100`）；旧调用（不带参数）自动走摘要，调用方无需改动参数，但注意返回内容从完整消息变为摘要（需要原文时显式 `include_messages=true`）。
 - **Response Size Guard**：hub 所有 MCP 响应统一 middleware，`MAX_RESPONSE_BYTES=50000`；超限自动 smart-truncate（保证仍是合法 JSON，挂 `truncated` 元数据），日志 `[mcp-guard] <tool> original=.. returned=.. truncated`。
 - **健康监控**：hub 新增 `GET /metrics`（请求数/平均与最大响应字节/截断与错误计数/活跃连接/perTool 明细）、`GET /readyz`（HA quorum 就绪）、`GET /version`；Dashboard 新增「MCP 控制面」页签展示。
 - **纠错插队/立即干预**：`sessions_prompt` 支持 `mode=queue|steer`（默认 queue 排队语义不变）；`steer` 绕过队列经 DSH 宿主 API 注入运行中回合（结构化返回 `steered/queued/rejected/unavailable`），DSH 历史事件 `agent/inbox/spliced` 证实注入。设计评审与实施细节见 [docs/priority-queue.md](docs/priority-queue.md)。
@@ -151,9 +151,20 @@ ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦
 - **无正文存储**：store 只存元数据与审计，不落 DSH 会话内容。
 - 详细安全模型见 [docs/security.md](docs/security.md) 与 [docs/threat-model.md](docs/threat-model.md)。
 
-## 状态
+## 状态与事实分层
 
-**v0.1.0**。自动化验证全绿（单元 + 双 fake node 全协议端到端集成测试）；macOS 双机 Tailscale 真机冒烟完成。CLI 的在线 RPC 命令（`nodes`/`node`/`route-explain`/`presence`/`rotate-token`）正在接通 live hub（当前提示 requires live hub connection），同一能力可经 hub MCP 工具（`nodes_list` 等）使用；`doctor`/`dashboard`/`install` 开发中；session handoff v1 诚实返回 unsupported。
+**版本 v0.1.0**。自动化验证全绿（单元 + 双 fake node 全协议端到端集成测试 + 信息保真验收：399/399（48 文件），build/lint 干净）；macOS 双机 Tailscale 真机冒烟完成。`doctor`/`dashboard`/`install` 已实现；CLI 在线 RPC 命令（`nodes`/`node`/`route-explain`/`presence`/`rotate-token`）仍需 live hub 连接（当前提示 requires live hub connection，计划下一里程碑），同一能力可经 hub MCP 工具（`nodes_list` 等）使用；session handoff v1 诚实返回 unsupported。
+
+能力状态按证据强度分层（不混淆）:
+
+| 层次 | 内容 | 证据 |
+|---|---|---|
+| **已实现并测试** | 五级路由 + fail-closed、HMAC 握手、presence（手动 + macOS 桌面探测）、分层健康、HA 双 CP（quorum/租约/failover + ha-proxy）、设备配对（pair/join）、MCP Context Isolation（默认摘要/Response Guard/steer 插队）、CLI 15 子命令 | 单元 + 集成测试全绿；acceptance 报告见 [docs/fidelity-acceptance.md](docs/fidelity-acceptance.md) 与 [docs/priority-queue.md](docs/priority-queue.md) |
+| **依赖上游但已实测** | DSH 0.1.1 `sessions_prompt mode=queue/steer`（宿主 API 注入；`agent/inbox/spliced` 验证）、`max_messages` 生效、`beforeSeq` 翻页无效（协议限制） | 真实链路 smoke + 探测记录（[docs/priority-queue.md](docs/priority-queue.md) §2/§5） |
+| **官方未说明 / 实验性** | 同一 OpenAI tunnel 多 tunnel-client 双实例语义（容灾阶梯 2，需实测）；Linux/Windows 平台支持 | OpenAI 官方文档零表述（[docs/chatgpt-disaster-recovery.md](docs/chatgpt-disaster-recovery.md)）；平台表见前文 |
+| **已知限制与未闭环风险** | ①最近 100 条之外的历史不可达（DSH 0.1.1 beforeSeq 无效；修复路径=agent 历史归档，见 fidelity §7）；②hub MCP（3471）v1 无鉴权——**严禁公网暴露**；③CLI 在线 RPC 命令未接通 live hub；④审计无防篡改/哈希链、token 静态明文存储（详见 threat-model §4/§5） | 验收/冒烟实测；威胁模型逐条 [docs/threat-model.md](docs/threat-model.md) |
+
+**明确不承诺**：非 production-ready 保证；HA 为自管控制面冗余，无 SLA / zero-downtime 承诺；OpenAI 官方能力边界（tunnel 多实例 HA、密钥自动轮换）未获得前不承诺。验收判定为 **CONDITIONAL PASS**（保真与安全闭环，完备性受 DSH 0.1.1 协议边界限制）。
 
 ## ops 脚本
 

@@ -95,8 +95,9 @@ ChatGPT ↔ DSH MCP Connector 链路中，一个长任务（如大上下文代�
    调用正常）✓；e2e broken 响应后恢复 ✓；
 6. `sessions_interrupt`（方案 B）不实施，与 steer 语义重叠，文档保留。
 
-全量测试：387/387（47 文件），build/lint 干净。真实 smoke 用本机 DSH 0.1.1
-（宿主 API 3080），测试会话已 cancel 清理。
+全量测试：验收时点 387/387（47 文件），build/lint 干净（此后仓库持续演进，
+最新全量结果见 [fidelity-acceptance.md](fidelity-acceptance.md) §9）。真实 smoke
+用本机 DSH 0.1.1（宿主 API 3080），测试会话已 cancel 清理。
 
 ## 6. 与 P0-P3 的关系
 

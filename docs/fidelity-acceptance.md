@@ -39,8 +39,8 @@ memory dump / 凭据（断言：`'messages' in sum === false`、文本不含 sec
 
 ## 2. 信息保真字段矩阵
 
-（基于最终实现：窗口=最后 20 条；current_goal=窗口内最后一条有实质内容的 user 消息；
-recent_evidence=窗口内启发式提取；history_ref=artifact 引用；凭据清洗=摘要字段全量过滤。）
+（基于最终实现：窗口=最后 20 条；current_goal=窗口内行动性排序最高的 user 消息（过滤确认词，
+附来源 seq）；recent_evidence=窗口内启发式提取；history_ref=artifact 引用；凭据清洗=摘要字段全量过滤。）
 
 | 字段 | long-task | tool-heavy | high-risk | 证据 |
 |---|---|---|---|---|
@@ -145,8 +145,9 @@ recent_evidence=窗口内启发式提取；history_ref=artifact 引用；凭据�
 - **P2（可读性/细节，可经显式历史读取解决）**：errors 提取噪音（"修复…失败"行）已修复；
   其余细节经 include_messages 读取。
 
-**结论：PASS（保真与安全）+ CONDITIONAL（完备性受 DSH 0.1.1 协议边界限制，条件=§7 归档增强）。
-三类 fixture 下游决策无错误安全结论。**
+**整体判定：CONDITIONAL PASS**——保真与安全子项 PASS（三类 fixture 下游决策无错误安全
+结论、零编造、零泄露）；完备性子项受 DSH 0.1.1 协议边界限制（条件=§7 归档增强），
+不满足 PASS 条件。**
 
 ### 5.1 验收中发现的 P1 信息损失（修复前后证据，不隐去）
 
@@ -255,6 +256,7 @@ pnpm test && pnpm build && pnpm lint
 
 - `pnpm test`：**399/399 passed（48 files）**（含 fidelity-acceptance 12 用例）
 - `pnpm build`：tsc -b 通过；`pnpm lint`：eslint 通过
-- commit：`643c866`（本轮验收 commit 包含：summary.ts 保真修复（窗口 20/current_goal 行动性排序/
+- commit：`643c866`（验收主体：summary.ts 保真修复（窗口 20/current_goal 行动性排序/
   recent_evidence/history_ref/safety_sanitized/凭据清洗）、fidelity fixtures/验收测试、
-  评审脚本（xdf 网关盲化评审）、本报告、评审原始回答存档 docs/fidelity-review/）
+  评审脚本（xdf 网关盲化评审）、本报告、评审原始回答存档 docs/fidelity-review/）、
+  `f9bd27f`（报告 commit SHA 回填）、`637a253`（安全纠偏：credential pattern 自律断言 + §5.2）

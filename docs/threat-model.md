@@ -222,7 +222,7 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 | T5 节点攻陷横向 | 中 | 中 | 中 | 星型拓扑 + 固定 RPC 面 + 元数据最小化 |
 | T6 路由欺骗 | 中 | 中 | 中 | 显式 target 优先 + 15s 歧义窗口 + 不猜测解析 |
 | T7 破坏性误路由 | 低 | 高 | **高** | fail-closed route_confirmation_required |
-| T8 审计篡改 | 中 | 中 | 中（待补） | 只 INSERT DAO + call_id 关联；落库未接通 |
+| T8 审计篡改 | 中 | 中 | 中 | 审计已接入执行路径（auditRoute/auditResult，v0.1.0 起）+ call_id 关联；无防篡改设计 |
 | T9 存储攻击 | 中 | 中 | 中 | WAL + schema 版本 + 无密钥存储 |
 | T10 daemon 边界 | 低（本机） | 高 | 中 | Bearer + loopback + sock 协议不上网 |
 | T11 供应链 | 低 | 高 | 中 | 固定 0.1.1 + lockfile；缺哈希背书 |
@@ -241,14 +241,14 @@ fail-closed：`danger=destructive|write` 且落到 no-route → 返回 `route_co
 | hub MCP 3471 | 默认 loopback | 无鉴权指令面 | v1 无鉴权，**严禁暴露公网** |
 | 上游 npm 包 | registry 与 tarball 可信 | 供应链投毒 | 固定 0.1.1 + lockfile；无哈希背书 |
 | 本地代理 | 代理进程可信 | 隧道控制面泄露/断连 | 接受（本机信任）；代理故障有自愈 |
-| 审计存储 | 本机文件不被篡改 | 取证失效 | DAO 就绪但**未接入执行路径**；无防篡改 |
+| 审计存储 | 本机文件不被篡改 | 取证失效 | 已接入执行路径（v0.1.0 起）；无防篡改（已接受） |
 
 ## 5. 后续加固方向（建议，未实现）
 
 按风险×代价排序，供后续阶段决策（均不改变当前 v1 行为）：
 
 1. **hub MCP 3471 加鉴权**（Bearer token 或与 mesh 同源的 HMAC）——当前最大的"无认证执行面"缺口（T1/T13）。
-2. **审计落库接通 + 哈希链**：把 `ControlPlane` 的执行路径接入 `AuditLog.append`/`logRoute`；可再加 `route_log` 的链式哈希（prev_hash 列）与定期导出（T8）。
+2. **审计防篡改（哈希链/定期导出）**：执行路径已接通（`ControlPlane.auditRoute`/`auditResult`，v0.1.0 起）；剩余加固=给 `route_log`/`audit` 加链式哈希（prev_hash 列）与定期导出（T8）。
 3. **限频与配额**：mesh 全局连接/握手限频（按 IP）、MCP 重工具配额、`mcp.call` payload 上限（T13）。
 4. **hub token 表接 secrets 管理**：`tokenLookup` 改为支持文件（0600）/secrets 服务，`rotate-token` 双 token 窗口支持（T3/T4）。
 5. **mesh 强制 WSS 或显式告警**：`ws://` 非 loopback 时启动告警/拒绝（部署期防呆）（T1）。

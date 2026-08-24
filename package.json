@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Multi-node control plane for DSH (DeepSeek Harness) ChatGPT Helm connectors",
+  "description": "Multi-node control plane and MCP gateway for DeepSeek Harness (DSH) ChatGPT Helm connectors",
   "engines": {
     "node": ">=22.5.0"
   },
