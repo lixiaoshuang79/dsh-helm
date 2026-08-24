@@ -75,7 +75,9 @@ export function runAgent(opts: AgentCliOptions, log: (l: string) => void = conso
       },
       log,
     })
-    void listener.listen()
+    listener.listen().catch((err: unknown) => {
+      log(`presence listener skipped: ${err instanceof Error ? err.message : err}`)
+    })
   } catch (err) {
     log(`presence listener skipped: ${err instanceof Error ? err.message : err}`)
   }

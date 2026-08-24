@@ -172,8 +172,7 @@ export function enrollClient(
           ws.send(JSON.stringify(m))
         } catch {
           /* socket gone */
-        }
-      },
+        }      },
     }
     const handshake = new HandshakeClient(sender, enrollId, '', 1, {
       onOutcome: (o) => {
@@ -182,7 +181,15 @@ export function enrollClient(
           return
         }
         opts.log?.(`connected to hub ${o.welcome.hub_id}`)
-        peer = new RpcPeer(sender, (l) => opts.log?.(l))
+        // RPC frames ride the `{type:'rpc', v, body}` wire envelope (handshake
+        // messages are sent bare); a bare JSON-RPC body would be misread by
+        // the hub as a handshake frame and dropped silently.
+        peer = new RpcPeer(
+          {
+            send: (m) => sender.send({ type: 'rpc', v: 1, body: m } as unknown as WireMessage),
+          },
+          (l) => opts.log?.(l),
+        )
         peer
           .request(HUB_METHODS.ENROLLMENT_CONSUME, params, { timeoutMs: 10_000 })
           .then((res) => {

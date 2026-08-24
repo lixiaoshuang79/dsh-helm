@@ -33,7 +33,14 @@ export class PresenceListener {
   }
 
   listen(): Promise<void> {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
+      // An async listen error (e.g. EADDRINUSE when another local agent is
+      // already serving presence on 3472) must not crash the process: the
+      // listener is an optional loopback helper. Swallow with a log line.
+      this.server.on('error', (err) => {
+        this.logFn?.(`presence listener error: ${err instanceof Error ? err.message : err}`)
+        reject(err)
+      })
       this.server.listen(this.port, '127.0.0.1', () => resolve())
     })
   }

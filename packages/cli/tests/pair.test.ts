@@ -27,14 +27,16 @@ function serveHub(ctx: ServeContext) {
       ctx.helloNodeId = String(m.node_id)
       return { type: 'welcome', v: 1, hub_id: 'hub-test', schema_version: 1, heartbeat_ms: 15_000, lease_ms: 45_000 }
     }
-    if (m.jsonrpc === '2.0' && m.method === 'enrollment.consume') {
-      const params = (m.params ?? {}) as Record<string, unknown>
+    // Wire format: RPC frames ride the {type:'rpc', v, body} envelope.
+    if (m.type === 'rpc' && m.body?.jsonrpc === '2.0' && m.body.method === 'enrollment.consume') {
+      const body = m.body as { id: unknown; params?: unknown }
+      const params = (body.params ?? {}) as Record<string, unknown>
       ctx.consumeParams = ctx.consumeParams ?? []
       ctx.consumeParams.push(params)
       if (ctx.failConsume) {
-        return rpc(m.id, { ok: false, reason: ctx.failConsume })
+        return rpc(body.id, { ok: false, reason: ctx.failConsume })
       }
-      return rpc(m.id, { ok: true, token: TOKEN })
+      return rpc(body.id, { ok: true, token: TOKEN })
     }
     return undefined
   }

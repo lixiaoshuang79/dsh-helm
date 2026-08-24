@@ -95,6 +95,21 @@ OpenAI Platform 侧完整教程（建 tunnel / 绑定 workspace / 建 API key / 
 
 **两种拓扑取舍**：每台 daemon 各配一个 tunnel+连接器（多入口、各管各），或一个 hub tunnel + 一个连接器管 N 台节点（单入口，推荐——hub 路由 `target_node`/路由规则，回复带 `node_name`）。
 
+## 控制面 HA（双 Control Plane）
+
+两台 hub 组成一个 quorum（2/2）控制面，任一台故障时另一台仍可服务读路由与节点入口。
+
+- **角色与租约**：`--cp-priority` 小者胜出为 leader（唯一写者）；leader 每 10s 向 peer 续写租约，peer 失联超过租约 TTL（`--cp-failover-ms`，默认 45s）→ 双方进入 `read-only-no-quorum`，写操作返回 `QUORUM_LOST`。**follower 永不单方提升**——失去 quorum 时只读不写（CAP 优先安全）。
+- **恢复**：peer 重连 → 注册表全量同步 → 强制重选（term+1）→ 租约双方确认 → 写恢复。整个恢复窗口内双方保持只读。
+- **agent 多 endpoint**：`node.json` 配 `hub_url` + `fallback_urls`，重连时轮询尝试、成功后 pin；故障时自动切到第二 CP。
+- **观测**：`GET /cp-status` 返回 `role/phase/writeMode/quorum/term/leaderId/peers/syncOk/leaseEpoch/failoverCount`；`dsh-helm doctor` 与 Dashboard「控制面 HA」卡直接展示。
+- **ChatGPT 入口 HA**：OpenAI tunnel-client 的 `--mcp.server-url` 是 channel 限定、无同连接器多后端 failover。本地起 `dsh-helm ha-proxy`（默认 `127.0.0.1:3481`，`--primary http://127.0.0.1:3471 --secondary http://<peer-cp>:3471`），tunnel 仍指向**一个**连接器（3481）；主 CP 失联自动切副 CP、恢复后切回。双 tunnel + 双连接器是备选拓扑。
+- **第二 CP 部署**：`dsh-helm hub --cp-peer ws://<peer-cp>:3470 --cp-priority 1 --cp-id <node-id> --cp-token-env DSH_HELM_CP_TOKEN`；两侧 `DSH_HELM_TOKEN` 都含**双方**节点 token 表（任一 agent 故障切换时对方 CP 都能认证）。MCP 需跨机可达时用 `--mcp-bind <tailnet-ip>`（Tailscale ACL 围栏，单机场景保持 loopback）。
+
+## 设备配对（新增 DSH 设备）
+
+Dashboard「新增 DSH 设备」→ 生成一次性配对码（10 分钟有效、单次消费、仅存哈希）；新机器执行 `dsh-helm join --control-plane ws://<hub>:3470 --code <code>` 完成入网（生成长期 node token 写入 `~/.dsh/helm/node.json`，hub 只存 hash/状态）。配对 API 仅 loopback + 防 CSRF 头；日志只记哈希前缀。详见 [docs/security.md](docs/security.md) §5。
+
 ## 平台支持
 
 | 平台 | hub | node agent | presence | 服务自启 |
