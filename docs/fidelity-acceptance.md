@@ -228,6 +228,6 @@ pnpm test && pnpm build && pnpm lint
 
 - `pnpm test`：**399/399 passed（48 files）**（含 fidelity-acceptance 12 用例）
 - `pnpm build`：tsc -b 通过；`pnpm lint`：eslint 通过
-- commit：`<SHA>`（本轮验收 commit 包含：summary.ts 保真修复（窗口 20/current_goal 行动性排序/
+- commit：`643c866`（本轮验收 commit 包含：summary.ts 保真修复（窗口 20/current_goal 行动性排序/
   recent_evidence/history_ref/safety_sanitized/凭据清洗）、fidelity fixtures/验收测试、
   评审脚本（xdf 网关盲化评审）、本报告、评审原始回答存档 docs/fidelity-review/）
