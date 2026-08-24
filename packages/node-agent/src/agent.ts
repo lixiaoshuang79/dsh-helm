@@ -122,6 +122,15 @@ export class HelmNodeAgent {
   private async connect(): Promise<void> {
     if (this.stopped) return
     this.state = 'connecting'
+    // Ensure the local helm MCP session gets initialized; must NOT delay socket
+    // event wiring below (ws.onopen must be set synchronously for tests/edge),
+    // so fire-and-forget here and guarantee readiness in registerAndReconcile.
+    if (!this.backend.connected) {
+      this.backend
+        .connect()
+        .then(() => this.log('local helm connected'))
+        .catch((err) => this.log(`local helm connect failed: ${err instanceof Error ? err.message : err} (datapath degraded)`))
+    }
     let ws: WebSocketLike
     try {
       ws = this.wsFactory(this.cfg.hub_url)
@@ -216,6 +225,14 @@ export class HelmNodeAgent {
   }
 
   private async registerAndReconcile(): Promise<void> {
+    // Guarantee the local helm session before serving hub RPCs / reconcile.
+    if (!this.backend.connected) {
+      try {
+        await this.backend.connect()
+      } catch {
+        /* datapath degraded; hub connectivity unaffected */
+      }
+    }
     try {
       await this.peer?.request(HUB_METHODS.NODE_REGISTER, { node: this.nodeInfo() })
     } catch (err) {
@@ -233,22 +250,54 @@ export class HelmNodeAgent {
     void this.scheduleReconcile()
   }
 
-  private async collectLocalCatalog(): Promise<{ sessions: SessionInfo[]; workspaces: WorkspaceInfo[] }> {
-    const { sessions: rawSessions, workspaces: rawWorkspaces } = await this.backend.reconcile()
-    const sessions: SessionInfo[] = rawSessions.map((s) => ({
-      native_session_id: String(s.session_id ?? s.native_session_id ?? ''),
-      title: s.title ? String(s.title) : undefined,
-      status: (String(s.status ?? 'unknown') as SessionInfo['status']),
-      live: Boolean((s as { live?: boolean }).live),
-      updated_at: s.updated_at ? String(s.updated_at) : undefined,
-      workspace_id: s.workspace_id ? String(s.workspace_id) : undefined,
-    }))
-    const workspaces: WorkspaceInfo[] = rawWorkspaces.map((w) => ({
+  /** tools/call sessions_list → flat array (tolerates structuredContent {sessions:[...]} or bare array). */
+  private async listSessionsRaw(): Promise<Array<Record<string, unknown>>> {
+    const res = await this.backend.callTool('sessions_list', {})
+    const sc = res.structuredContent as Record<string, unknown> | undefined
+    if (Array.isArray(sc)) return sc as Array<Record<string, unknown>>
+    if (sc && Array.isArray(sc.sessions)) return sc.sessions as Array<Record<string, unknown>>
+    return []
+  }
+
+  /** tools/call workspaces_list → flat array (tolerates structuredContent {workspaces:[...]} or bare array). */
+  private async listWorkspacesRaw(): Promise<Array<Record<string, unknown>>> {
+    const res = await this.backend.callTool('workspaces_list', {})
+    const sc = res.structuredContent as Record<string, unknown> | undefined
+    if (Array.isArray(sc)) return sc as Array<Record<string, unknown>>
+    if (sc && Array.isArray(sc.workspaces)) return sc.workspaces as Array<Record<string, unknown>>
+    return []
+  }
+
+  /** Map raw helm session rows (real daemon uses `id`/`workspace`/`updatedAt`/`native.live`). */
+  private toSessionInfos(raw: Array<Record<string, unknown>>): SessionInfo[] {
+    return raw.map((s) => {
+      const native = (s as { native?: { live?: boolean } }).native
+      return {
+        native_session_id: String(s.session_id ?? s.id ?? s.native_session_id ?? ''),
+        title: s.title ? String(s.title) : undefined,
+        status: (String(s.status ?? 'unknown') as SessionInfo['status']),
+        live: Boolean((s as { live?: boolean }).live ?? native?.live ?? false),
+        updated_at: String(s.updatedAt ?? s.updated_at ?? ''),
+        workspace_id: s.workspace_id ? String(s.workspace_id) : s.workspace ? String(s.workspace) : undefined,
+      }
+    })
+  }
+
+  /** Map raw helm workspace rows (real daemon uses `id`). */
+  private toWorkspaceInfos(raw: Array<Record<string, unknown>>): WorkspaceInfo[] {
+    return raw.map((w) => ({
       native_workspace_id: String(w.workspace_id ?? w.id ?? w.native_workspace_id ?? ''),
       path: String(w.path ?? ''),
       title: w.title ? String(w.title) : undefined,
     }))
-    return { sessions, workspaces }
+  }
+
+  private async collectLocalCatalog(): Promise<{ sessions: SessionInfo[]; workspaces: WorkspaceInfo[] }> {
+    const { sessions: rawSessions, workspaces: rawWorkspaces } = await this.backend.reconcile()
+    return {
+      sessions: this.toSessionInfos(rawSessions as Array<Record<string, unknown>>),
+      workspaces: this.toWorkspaceInfos(rawWorkspaces as Array<Record<string, unknown>>),
+    }
   }
 
   private scheduleReconcile(): void {
@@ -266,9 +315,21 @@ export class HelmNodeAgent {
     t.unref?.()
   }
 
+    private lastProbeAt = 0
+
   private async heartbeat(): Promise<void> {
     if (!this.peer) return
     this.seq++
+    // Periodic local datapath probe (local_probe_ms) so hub health aggregations
+    // see real adapter/datapath/serena layers instead of the initial unknown.
+    if (Date.now() - this.lastProbeAt >= this.cfg.local_probe_ms) {
+      try {
+        await this.probeLocal()
+      } catch {
+        /* probeLocal updates this.health itself; transient errors tolerated */
+      }
+      this.lastProbeAt = Date.now()
+    }
     const status: NodeStatus = {
       seq: this.seq,
       ts: new Date().toISOString(),
@@ -286,14 +347,8 @@ export class HelmNodeAgent {
   private registerRpcHandlers(): void {
     if (!this.peer) return
     this.peer.on(NODE_METHODS.HEALTH, async () => this.healthPayload())
-    this.peer.on(NODE_METHODS.LIST_WORKSPACES, async () => {
-      const res = await this.backend.callTool('workspaces_list', {})
-      return res.structuredContent ?? res.content ?? []
-    })
-    this.peer.on(NODE_METHODS.LIST_SESSIONS, async () => {
-      const res = await this.backend.callTool('sessions_list', {})
-      return res.structuredContent ?? res.content ?? []
-    })
+    this.peer.on(NODE_METHODS.LIST_WORKSPACES, async () => this.toWorkspaceInfos(await this.listWorkspacesRaw()))
+    this.peer.on(NODE_METHODS.LIST_SESSIONS, async () => this.toSessionInfos(await this.listSessionsRaw()))
     this.peer.on(NODE_METHODS.CREATE_SESSION, async (p) => {
       const params = p as { workspace?: string; title?: string; initial_message?: string }
       const res = await this.backend.callTool('sessions_create', {

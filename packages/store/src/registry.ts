@@ -31,6 +31,10 @@ export interface StoredNode extends Omit<NodeRow, 'platform' | 'versions' | 'cap
 }
 
 export class NodeRegistry {
+  /** Latest per-node HealthReport from heartbeats (memory only; metadata store
+   *  never persists payloads, and health is inherently ephemeral). */
+  private healthCache = new Map<string, HealthReport>()
+
   constructor(private db: DatabaseLike) {}
 
   /** Register (or refresh metadata of) a node. Preserves status/last_seen on re-register. */
@@ -68,10 +72,17 @@ export class NodeRegistry {
     this.db
       .prepare(`UPDATE nodes SET status = 'online', last_seen = ?, heartbeat_seq = ? WHERE node_id = ?`)
       .run(status.ts, status.seq, nodeId)
+    if (status.health) this.healthCache.set(nodeId, status.health)
+  }
+
+  /** Latest reported layered health for a node (undefined if never reported). */
+  healthReport(nodeId: string): HealthReport | undefined {
+    return this.healthCache.get(nodeId)
   }
 
   /** Mark a node offline (lease expiry / heartbeat loss). */
   markOffline(nodeId: string, reason?: string): void {
+    this.healthCache.delete(nodeId)
     this.db
       .prepare(`UPDATE nodes SET status = 'offline', blocked_reason = ? WHERE node_id = ?`)
       .run(reason ?? null, nodeId)

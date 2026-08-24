@@ -47,7 +47,8 @@ export class HealthAggregator {
   }
 
   /** Layered health summary for one node (channel from registry + reported layers). */
-  nodeHealth(node: StoredNode, reported?: HealthReport): NodeHealthSummary {
+  nodeHealth(node: StoredNode): NodeHealthSummary {
+    const reported = this.deps.nodes.healthReport(node.node_id)
     const channel = this.deps.nodes.channelHealth(node.node_id, this.leaseMs)
     const adapter: LayerHealth = reported?.adapter ?? { status: 'unknown', code: 'no-report', detail: 'node has not reported adapter health' }
     const datapath: LayerHealth = reported?.datapath ?? { status: 'unknown', code: 'no-report', detail: 'node has not reported datapath health' }

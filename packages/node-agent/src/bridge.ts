@@ -83,8 +83,9 @@ export class McpLocalHelmBackend implements LocalHelmBackend {
     this.logFn = opts.log
   }
 
-  /** MCP initialize; returns server info. */
+  /** MCP initialize; returns server info. Idempotent while a session is live. */
   async connect(): Promise<{ name?: string; version?: string }> {
+    if (this.sessionId) return this.serverInfo ?? {}
     const res = await this.post({
       jsonrpc: '2.0',
       id: this.nextId++,
