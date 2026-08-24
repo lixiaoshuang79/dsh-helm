@@ -38,6 +38,9 @@ import type { LocalHelmBackend } from './bridge.js'
 export const MAX_SUMMARY_CHARS = 300
 /** 摘要缓存 TTL（毫秒）。 */
 export const SUMMARY_TTL_MS = 60_000
+/** 摘要信息来源窗口：向 DSH 取最后 N 条消息（信息保真验收定值；
+   *  更早事实经 history_ref + include_messages 显式获取，DSH 0.1.1 上限 100）。 */
+export const SUMMARY_WINDOW = 20
 
 /** GET_SESSION 请求参数（hub schema 透传；未传按默认处理）。 */
 export interface GetSessionParams {
@@ -60,6 +63,31 @@ export interface SessionSummary {
   updated_at: string
   last_message_summary: string
   last_assistant_summary: string
+  /** 当前目标：窗口内行动性最高的 user 消息（DSH 无 goal 字段；行动性排序见 actionScore）。 */
+  current_goal: string
+  /** current_goal 来源消息的 seq（追溯证据）。 */
+  current_goal_seq?: number
+  /** 窗口内最后一条有实质内容的 user 消息原文（证据保留，不被行动性排序覆盖）。 */
+  last_user_message: string
+  /** 窗口内启发式提取的工程证据（正则；每类 ≤3 条；extracted=true 表示启发式）。 */
+  recent_evidence: {
+    commits: string[]
+    paths: string[]
+    errors: string[]
+    tests: string[]
+    extracted: true
+  }
+  /** 完整历史/更早事实的 artifact 引用（P1 修复：远端事实经此显式获取）。 */
+  history_ref: {
+    include_messages: true
+    max_messages: number
+    before_seq?: number
+    /** DSH 0.1.1 实际可达的消息条数上限（max_messages≤100 且 beforeSeq 无效）。 */
+    reachable_max_messages: number
+    pagination: 'dsh-beforeSeq-unsupported-0.1.1'
+  }
+  /** true=窗口内检测到疑似凭据并被清洗（摘要文本已剔除）。 */
+  safety_sanitized: boolean
   /** 数字令牌数：有 DSH 真实统计用真实值，否则为估算值。 */
   token_estimate: number
   /** true=token_estimate 为估算值（无真实统计字段时）。 */
@@ -123,31 +151,55 @@ export class SessionSummaryService {
     return enriched
   }
 
-  /** 现场构建摘要：向 DSH 取最后 2 条消息（max_messages 实测有效）。 */
+  /** 现场构建摘要：向 DSH 取最后 20 条消息（max_messages 实测有效；更早事实
+   *  经 history_ref 显式获取——DSH 0.1.1 beforeSeq 无效，最大可达 100 条）。 */
   async buildSummary(sessionId: string): Promise<SessionSummary> {
-    // 优先用 DSH 的 max_messages=2 限制响应体积（探测确认有效）；
-    // 若未来 DSH 忽略该参数返回全部消息，extractTail 兜底只取最后 2 条。
-    const res = await this.backend.callTool('sessions_get', { session_id: sessionId, max_messages: 2 })
+    const res = await this.backend.callTool('sessions_get', { session_id: sessionId, max_messages: SUMMARY_WINDOW })
     const payload = (res.structuredContent ?? {}) as Record<string, unknown>
     const session = (payload.session ?? payload) as Record<string, unknown>
     const rawMessages = Array.isArray(session.messages) ? (session.messages as Array<Record<string, unknown>>) : []
-    const messages = rawMessages.length > 2 ? rawMessages.slice(-2) : rawMessages
-
+    const messages = rawMessages.length > SUMMARY_WINDOW ? rawMessages.slice(-SUMMARY_WINDOW) : rawMessages
     const status = stringOf(session, ['status']) ?? 'unknown'
     const last = messages[messages.length - 1]
+    // current_goal：窗口内「有实质内容」的 user 消息中按行动性排序取最高者
+    // （显式 next_action/计划信号 > 命令式动词 > 其余；同分取更近），
+    // 避免无行动性的模板/确认文本覆盖明确目标；附来源 seq 供追溯。
+    const users = messages.filter((m) => m.role === 'user' && isSubstantiveUserMessage(stringOf(m, ['text']) ?? ''))
+    const goalMsg = users.reduce<{ m: Record<string, unknown>; score: number; seq: number } | undefined>((best, m) => {
+      const score = actionScore(stringOf(m, ['text']) ?? '')
+      const seq = typeof m.seq === 'number' ? (m.seq as number) : -1
+      if (!best || score > best.score || (score === best.score && seq >= best.seq)) return { m, score, seq }
+      return best
+    }, undefined)
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user' && isSubstantiveUserMessage(stringOf(m, ['text']) ?? ''))
     const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
     const lastAssistantText = lastAssistant ? stringOf(lastAssistant, ['text']) ?? '' : stringOf(session, ['lastAssistantText']) ?? ''
+    const evidence = extractEvidence(messages)
+    // 凭据清洗标记：任一窗口消息文本被剔除疑似凭据行（摘要字段统一经 sanitize）
+    const sanitized = messages.some((m) => sanitizeSecretLines(stringOf(m, ['text']) ?? '') !== stringOf(m, ['text']))
 
     return {
       id: stringOf(session, ['id', 'session_id']) ?? sessionId,
-      title: stringOf(session, ['title']) ?? '',
+      title: sanitizeSecretLines(stringOf(session, ['title']) ?? ''),
       status,
-      workspace: stringOf(session, ['workspace']) ?? '',
+      workspace: sanitizeSecretLines(stringOf(session, ['workspace']) ?? ''),
       // DSH 无 createdAt（探测结论 6），映射为空串
       created_at: stringOf(session, ['createdAt', 'created_at']) ?? '',
-      updated_at: stringOf(session, ['updatedAt', 'updated_at']) ?? '',
-      last_message_summary: last ? truncate(stringOf(last, ['text']) ?? '') : '',
-      last_assistant_summary: truncate(lastAssistantText),
+      updated_at: sanitizeSecretLines(stringOf(session, ['updatedAt', 'updated_at']) ?? ''),
+      last_message_summary: last ? sanitizeSecretLines(truncate(stringOf(last, ['text']) ?? '')) : '',
+      last_assistant_summary: sanitizeSecretLines(truncate(lastAssistantText)),
+      current_goal: goalMsg ? sanitizeSecretLines(truncate(stringOf(goalMsg.m, ['text']) ?? '')) : '',
+      current_goal_seq: goalMsg && typeof goalMsg.m.seq === 'number' ? (goalMsg.m.seq as number) : undefined,
+      last_user_message: lastUser ? sanitizeSecretLines(truncate(stringOf(lastUser, ['text']) ?? '')) : '',
+      recent_evidence: evidence,
+      history_ref: {
+        include_messages: true,
+        max_messages: SUMMARY_WINDOW,
+        before_seq: messages.length > 0 && typeof messages[0]?.seq === 'number' ? (messages[0].seq as number) : undefined,
+        reachable_max_messages: 100,
+        pagination: 'dsh-beforeSeq-unsupported-0.1.1',
+      },
+      safety_sanitized: sanitized,
       // token：优先用 DSH 返回里的 token/usage 字段（探测：当前版本无），
       // 没有就估算（字符数/4，取整，标记 estimated）
       ...tokenEstimate(session, messages),
@@ -219,10 +271,100 @@ function truthy(obj: Record<string, unknown>, keys: string[]): boolean {
   return false
 }
 
+/** 有实质内容的 user 消息（current_goal 来源过滤）：长度 >6 且非纯确认词。
+ * 注意：确认词必须整串锚定（CJK 文本无 ASCII 词边界，\b 对中文无效）。
+ */
+function isSubstantiveUserMessage(text: string): boolean {
+  const t = text.trim()
+  if (t.length <= 6) return false
+  if (/^(继续|好的?|好|OK|ok|嗯|是的?|对|收到|可以|行|知道了?|了解)[。.!！]?$/.test(t)) return false
+  return true
+}
+
+/** 显式 next_action/计划信号（+2）：下一步/接下来/请/待办/记得/马上/立即/务必/请先/先做 */
+const ACTION_HIGH = /(下一步|接下来|请|待办|记得|马上|立即|务必|优先|请先|先做|现在|马上)/
+/** 命令式动词起始（+1）。 */
+const ACTION_LOW = /^(实现|修复|处理|生成|检查|更新|补充|运行|跑|执行|创建|删除|改为|改成|继续写|写|调|查|测|测试|部署|提交|推送|合并|解决|优化|重构|清理|验证)/
+
+/**
+ * user 消息行动性打分（current_goal 选择依据）：显式 next_action > 命令式动词 > 其余。
+ * 目标：无行动性的模板/确认文本不得覆盖明确目标/next_action；同分取更近消息。
+ */
+export function actionScore(text: string): number {
+  const t = text.trim()
+  if (ACTION_HIGH.test(t)) return 2
+  if (ACTION_LOW.test(t)) return 1
+  return 0
+}
+
 /** 截断到 MAX_SUMMARY_CHARS 字符（保留省略号占位）。 */
 function truncate(s: string, max = MAX_SUMMARY_CHARS): string {
   if (s.length <= max) return s
   return `${s.slice(0, max)}…`
+}
+
+/**
+ * 凭据清洗：剔除疑似凭据的片段（Bearer token、API key/token/password/secret
+ * 赋值、sk-* 形密钥、AKIA 形 AWS key）。用于所有摘要文本字段之前。
+ * 注意：清洗的目的是"摘要不携带秘密"，不修改 DSH 原始消息。
+ */
+const SECRET_PATTERNS: RegExp[] = [
+  /Bearer\s+[A-Za-z0-9._~+/=-]{6,}/gi,
+  /\b(?:api[_-]?key|access[_-]?key|token|password|passwd|secret|client[_-]?secret)\s*[:=]\s*[^\s,;"']{6,}/gi,
+  /\bsk-[A-Za-z0-9_-]{8,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+]
+function sanitizeSecretLines(s: string): string {
+  let out = s
+  for (const re of SECRET_PATTERNS) out = out.replace(re, '[redacted]')
+  return out
+}
+
+/**
+ * 窗口内启发式提取工程证据（正则去重，每类 ≤3 条）。
+ * extracted:true 固定标注——这些不是 DSH 结构化字段，是文本正则提取。
+ */
+export interface RecentEvidence {
+  commits: string[]
+  paths: string[]
+  errors: string[]
+  tests: string[]
+  extracted: true
+}
+export function extractEvidence(messages: Array<Record<string, unknown>>): RecentEvidence {
+  const commits: string[] = []
+  const paths: string[] = []
+  const errors: string[] = []
+  const tests: string[] = []
+  const seen = new Set<string>()
+  const pushIfNew = (arr: string[], v: string): void => {
+    if (v && !seen.has(v) && arr.length < 3) {
+      seen.add(v)
+      arr.push(v)
+    }
+  }
+  for (const m of messages) {
+    const text = sanitizeSecretLines(stringOf(m, ['text']) ?? '')
+    // commit hash：必须带 commit 前缀（避免误抓随机 hex）
+    for (const mm of text.matchAll(/commit\s+([0-9a-f]{7,40})/g)) {
+      pushIfNew(commits, mm[1]!)
+    }
+    // 文件/测试路径
+    for (const mm of text.matchAll(/\/(?:[\w.-]+\/)*[\w.-]+\.(?:ts|js|py|go|rs|java|md|json|yaml|yml|sh|sql|conf)\b/g)) {
+      pushIfNew(paths, mm[0]!)
+    }
+    // 错误行（跳过"修复…失败"这类指令文本，避免把修复要求当错误）
+    for (const mm of text.matchAll(/(?:Error|error|ERROR|失败|错误)[^\n]{0,60}/g)) {
+      const line = mm[0]!.trim().slice(0, 80)
+      if (/^修复.{0,20}(失败|错误)/.test(line)) continue
+      pushIfNew(errors, line)
+    }
+    // 测试结果
+    for (const mm of text.matchAll(/\d+\s+passed[^\n]{0,40}|\d+\s+failed[^\n]{0,40}|PASS[^\n]{0,40}|FAIL[^\n]{0,40}/g)) {
+      pushIfNew(tests, mm[0]!.trim().slice(0, 80))
+    }
+  }
+  return { commits: commits.slice(0, 3), paths: paths.slice(0, 3), errors: errors.slice(0, 3), tests: tests.slice(0, 3), extracted: true }
 }
 
 /**

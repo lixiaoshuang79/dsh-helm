@@ -103,8 +103,8 @@ describe('SessionSummaryService（P0 摘要 + P2 缓存）', () => {
     const serialized = JSON.stringify(out)
     expect(serialized.length).toBeLessThan(10_000)
     expect(serialized.length).toBeLessThan(50_000)
-    // 摘要路径只向 DSH 要最后 2 条消息（max_messages 参数确认生效）
-    expect(backend.lastGetArgs).toEqual({ session_id: 's-big', max_messages: 2 })
+    // 摘要路径只向 DSH 要最后 SUMMARY_WINDOW(20) 条消息（max_messages 参数确认生效）
+    expect(backend.lastGetArgs).toEqual({ session_id: 's-big', max_messages: 20 })
   })
 
   it('摘要字段齐全且值正确（截断/时间/可继续/token 估算）', async () => {
