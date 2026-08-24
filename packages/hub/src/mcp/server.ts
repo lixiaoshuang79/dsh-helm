@@ -19,6 +19,8 @@ import type { PresenceClaim, RouteDecision } from '@dsh-helm/protocol'
 import { DANGER, ROUTE_OUTCOME } from '@dsh-helm/protocol'
 import { ControlPlane } from '../control-plane.js'
 import { TOOL_BY_NAME, WRITE_TOOLS, type ToolDef } from './tools.js'
+import { applyGuard } from './guard.js'
+import { McpMetrics } from './metrics.js'
 
 export interface HubMcpServerOptions {
   cp: ControlPlane
@@ -27,6 +29,8 @@ export interface HubMcpServerOptions {
    *  locally (single-writer fencing). */
   ha?: WriteForwarder
   log?: (line: string) => void
+  /** MCP 调用指标计数器（/metrics 数据源）。缺省自建一个。 */
+  metrics?: McpMetrics
 }
 
 /** Minimal HA surface the MCP server needs (implemented by HubHa). */
@@ -59,11 +63,14 @@ export class HubMcpServer {
   private cp: ControlPlane
   private ha?: WriteForwarder
   private logFn?: (line: string) => void
+  /** MCP 调用指标（public：hub-cli 的 /metrics 与测试直接读取）。 */
+  readonly metrics: McpMetrics
 
   constructor(opts: HubMcpServerOptions) {
     this.cp = opts.cp
     this.ha = opts.ha
     this.logFn = opts.log
+    this.metrics = opts.metrics ?? new McpMetrics()
   }
 
   log(line: string): void {
@@ -83,13 +90,13 @@ export class HubMcpServer {
   async callTool(call: McpToolCall): Promise<McpCallResult> {
     const def = TOOL_BY_NAME.get(call.name)
     if (!def) {
-      return { content: [{ type: 'text', text: `unknown tool: ${call.name}` }], isError: true }
+      return this.finish({ content: [{ type: 'text', text: `unknown tool: ${call.name}` }], isError: true }, call.name, 'unknown tool')
     }
     const args = call.arguments ?? {}
     const callId = `mcp-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
     try {
       if (def.discovery) {
-        return this.handleDiscovery(def, args, callId)
+        return this.finish(await this.handleDiscovery(def, args, callId), def.name)
       }
       // Single-writer fencing via 2/2-quorum write lease: while this hub is
       // NOT the leased leader (writeMode 'readonly'), every mutating tool is
@@ -97,14 +104,25 @@ export class HubMcpServer {
       // structured QUORUM_LOST error.
       if (this.ha && WRITE_TOOLS.has(def.name) && this.ha.writeMode() === 'readonly') {
         this.log(`[ha] write ${def.name} via HA path (writeMode=readonly)`)
-        return await this.ha.handleWrite(def.name, args)
+        return this.finish(await this.ha.handleWrite(def.name, args), def.name)
       }
-      return await this.handleRouted(def, args, callId)
+      return this.finish(await this.handleRouted(def, args, callId), def.name)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       this.log(`tool ${call.name} error: ${msg}`)
-      return { content: [{ type: 'text', text: `error: ${msg}` }], isError: true }
+      return this.finish({ content: [{ type: 'text', text: `error: ${msg}` }], isError: true }, call.name, msg)
     }
+  }
+
+  /** 统一出口：所有返回路径（含 isError 与 HA 转发结果）都过 Response Size
+   *  Guard（P1），并记录调用指标（P3）。errorMsg 缺省时按 isError 派生
+   * （this.error() 直返的错误响应同样计入 errorCount）。 */
+  private finish(result: McpCallResult, tool: string, errorMsg?: string): McpCallResult {
+    const guarded = applyGuard(result, tool, (line) => this.log(line))
+    const text = guarded.content[0]?.text ?? ''
+    const err = errorMsg ?? (guarded.isError ? text : undefined)
+    this.metrics.recordRequest(tool, Buffer.byteLength(text), guarded !== result, err)
+    return guarded
   }
 
   // ---- discovery tools (hub-local answers) ----

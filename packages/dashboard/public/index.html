@@ -84,6 +84,13 @@
   .pair-countdown { color: var(--muted); font-family: var(--mono); font-size: 12px; }
   .pair-note { color: var(--muted); font-size: 11px; margin: 6px 0 10px; }
   .panel h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin: 12px 0 6px; }
+  .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); }
+  .tab-btn {
+    background: transparent; color: var(--muted); border: 1px solid transparent;
+    border-bottom: none; border-radius: 4px 4px 0 0; padding: 6px 16px; font-size: 12px;
+  }
+  .tab-btn:hover { border-color: var(--border); color: var(--text); }
+  .tab-btn.active { background: var(--panel); border-color: var(--border); color: var(--text); }
   footer { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 </style>
 </head>
@@ -99,6 +106,12 @@
 
 <div class="banner" id="banner"></div>
 
+<nav class="tabs">
+  <button type="button" class="tab-btn active" data-tab="overview">总览</button>
+  <button type="button" class="tab-btn" data-tab="mcp">MCP 控制面</button>
+</nav>
+
+<div id="tab-overview">
 <section class="cards" id="overview"></section>
 
 <section class="panel">
@@ -139,6 +152,14 @@
 <section class="panel">
   <h2>服务</h2>
   <div id="services-table"></div>
+</section>
+</div>
+
+<section class="panel" id="tab-mcp" style="display:none">
+  <h2>MCP 控制面</h2>
+  <div class="cards" id="mcp-cards"></div>
+  <h3>按工具统计（perTool）</h3>
+  <div id="mcp-table"></div>
 </section>
 
 <footer>
@@ -181,6 +202,31 @@ function card(title, rows) {
 
 function mono(text) {
   return el('span', 'mono', text ?? '—');
+}
+
+function fmtNum(v) {
+  if (v === undefined || v === null) return '—';
+  return String(v);
+}
+
+function fmtBytes(v) {
+  if (v === undefined || v === null) return '—';
+  if (v >= 1024 * 1024) return `${(v / (1024 * 1024)).toFixed(1)} MB`;
+  if (v >= 1024) return `${(v / 1024).toFixed(1)} KB`;
+  return `${v} B`;
+}
+
+function fmtUptime(ms) {
+  if (ms === undefined || ms === null) return '—';
+  const total = Math.floor(ms / 1000);
+  const d = Math.floor(total / 86400);
+  const h = Math.floor((total % 86400) / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (d > 0) return `${d} 天 ${h} 小时 ${m} 分`;
+  if (h > 0) return `${h} 小时 ${m} 分 ${s} 秒`;
+  if (m > 0) return `${m} 分 ${s} 秒`;
+  return `${s} 秒`;
 }
 
 function relTime(v) {
@@ -441,6 +487,73 @@ function renderServices(s) {
 
 let lastStatus = null;
 
+// ---- MCP 控制面（GET /api/metrics -> hub GET /metrics）----
+
+function renderMcp(m) {
+  const data = m || {};
+  const cardsWrap = $('mcp-cards');
+  cardsWrap.textContent = '';
+  if (data.error) {
+    // 探测失败：与现有容错样式一致，只渲染错误行，不拖垮页面
+    cardsWrap.append(card('MCP 控制面', [kvRow('错误', el('span', 'err', data.error))]));
+  } else {
+    const statusBadge =
+      data.status === 'ok' ? badge('ok', 'ok') :
+      data.status === 'degraded' ? badge('degraded', 'warn') :
+      badge(String(data.status || '—'), 'mute');
+    const errBadge = (data.errorCount || 0) > 0 ? badge(fmtNum(data.errorCount), 'bad') : mono('0');
+    const truncBadge = (data.truncationCount || 0) > 0 ? badge(fmtNum(data.truncationCount), 'warn') : mono('0');
+    cardsWrap.append(
+      card('Server', [
+        kvRow('状态', statusBadge),
+        kvRow('版本', mono(data.version || '—')),
+        kvRow('运行时长', mono(fmtUptime(data.uptimeMs))),
+      ]),
+      card('请求', [
+        kvRow('请求总数', mono(fmtNum(data.requestCount))),
+        kvRow('平均响应', mono(fmtBytes(data.avgResponseBytes))),
+        kvRow('最大响应', mono(fmtBytes(data.maxResponseBytes))),
+      ]),
+      card('健康', [
+        kvRow('截断次数', truncBadge),
+        kvRow('错误数', errBadge),
+        kvRow('活跃连接', mono(fmtNum(data.activeConnections))),
+      ]),
+    );
+  }
+
+  const wrap = $('mcp-table');
+  wrap.textContent = '';
+  const tools = Array.isArray(data.perTool) ? data.perTool : [];
+  if (data.error) {
+    wrap.append(el('p', 'empty', '无法获取按工具统计（hub 未就绪）'));
+    return;
+  }
+  if (tools.length === 0) {
+    wrap.append(el('p', 'empty', '暂无工具调用数据'));
+    return;
+  }
+  const table = el('table', 'data-table');
+  const head = el('tr');
+  for (const h of ['工具', '调用次数', '平均响应', '最大响应', '截断', '错误']) head.append(el('th', null, h));
+  table.append(head);
+  for (const t of tools) {
+    const tr = el('tr');
+    tr.append(el('td', 'mono', t.tool || '—'));
+    tr.append(el('td', null, fmtNum(t.count)));
+    tr.append(el('td', 'mono', fmtBytes(t.avgBytes)));
+    tr.append(el('td', 'mono', fmtBytes(t.maxBytes)));
+    const truncTd = el('td');
+    truncTd.append((t.truncated || 0) > 0 ? badge(fmtNum(t.truncated), 'warn') : mono('0'));
+    tr.append(truncTd);
+    const errTd = el('td');
+    errTd.append((t.errors || 0) > 0 ? badge(fmtNum(t.errors), 'bad') : mono('0'));
+    tr.append(errTd);
+    table.append(tr);
+  }
+  wrap.append(table);
+}
+
 function render(s) {
   lastStatus = s;
   renderOverview(s);
@@ -562,10 +675,20 @@ async function load() {
   const btn = $('refresh-btn');
   btn.disabled = true;
   try {
-    const res = await fetch('/api/status', { cache: 'no-store' });
-    if (!res.ok) throw new Error(`/api/status http ${res.status}`);
-    const status = await res.json();
+    // 状态与 MCP 指标并行拉取；/api/metrics 代理对 hub 探测失败返回
+    // { error } 而非 5xx，因此错误走 renderMcp 的错误行而不是这里
+    const [status, metrics] = await Promise.all([
+      fetch('/api/status', { cache: 'no-store' }).then(async (res) => {
+        if (!res.ok) throw new Error(`/api/status http ${res.status}`);
+        return res.json();
+      }),
+      fetch('/api/metrics', { cache: 'no-store' }).then(async (res) => {
+        if (!res.ok) throw new Error(`/api/metrics http ${res.status}`);
+        return res.json();
+      }),
+    ]);
     render(status);
+    renderMcp(metrics);
     hideBanner();
     $('last-updated').textContent = `最后更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
   } catch (err) {
@@ -598,6 +721,15 @@ $('auto-refresh').addEventListener('change', (e) => {
 });
 $('refresh-btn').addEventListener('click', load);
 $('pair-btn').addEventListener('click', generatePair);
+
+// ---- 页签切换（总览 / MCP 控制面）----
+
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach((b) => b.classList.toggle('active', b.dataset.tab === name));
+  $('tab-overview').style.display = name === 'overview' ? '' : 'none';
+  $('tab-mcp').style.display = name === 'mcp' ? '' : 'none';
+}
+document.querySelectorAll('.tab-btn').forEach((b) => b.addEventListener('click', () => switchTab(b.dataset.tab)));
 
 startAutoRefresh();
 load();

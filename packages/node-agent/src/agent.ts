@@ -17,7 +17,9 @@ import type { WireMessage, NodeInfo, NodeStatus, HealthReport, SessionInfo, Work
 import { HandshakeClient, NODE_METHODS, HUB_METHODS, RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
 import { DEFAULT_HEARTBEAT_MS, DEFAULT_NODE_LEASE_MS, RECONNECT_BACKOFF_BASE_MS, RECONNECT_BACKOFF_MAX_MS } from '@dsh-helm/protocol'
 import type { LocalHelmBackend } from './bridge.js'
-import type { NodeAgentConfig } from './config.js'
+import { defaultConfigDir, type NodeAgentConfig } from './config.js'
+import { join } from 'node:path'
+import { SessionSummaryService, type GetSessionParams } from './summary.js'
 
 export interface NodeAgentOptions {
   config: NodeAgentConfig
@@ -30,6 +32,8 @@ export interface NodeAgentOptions {
   log?: (line: string) => void
   heartbeatMs?: number
   leaseMs?: number
+  /** 摘要缓存目录（默认 ~/.dsh/helm/summaries；测试注入临时目录）。 */
+  summaryCacheDir?: string
 }
 
 /** Minimal WebSocket surface used by the agent (compatible with undici/ws). */
@@ -54,6 +58,8 @@ export class HelmNodeAgent {
   private logFn?: (line: string) => void
   private heartbeatMs: number
   private leaseMs: number
+  /** sessions_get 响应隔离（P0 摘要 + P2 缓存），GET_SESSION 与 MCP_CALL 共用。 */
+  private summaries: SessionSummaryService
   private state: AgentState = 'idle'
   private socket?: WebSocketLike
   private peer?: RpcPeer
@@ -82,6 +88,10 @@ export class HelmNodeAgent {
     this.logFn = opts.log
     this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     this.leaseMs = opts.leaseMs ?? DEFAULT_NODE_LEASE_MS
+    this.summaries = new SessionSummaryService(opts.backend, {
+      cacheDir: opts.summaryCacheDir ?? join(defaultConfigDir(), 'summaries'),
+      log: (l) => this.log(l),
+    })
   }
 
   get stateLabel(): AgentState {
@@ -401,31 +411,46 @@ export class HelmNodeAgent {
         title: params.title,
         initial_message: params.initial_message,
       })
+      // 新建会话后无缓存可失效，但统一清一下对应缓存（幂等 no-op）
+      const created = (res.structuredContent ?? {}) as { session_id?: unknown; id?: unknown }
+      const sid = String(created.session_id ?? created.id ?? '')
+      if (sid) this.summaries.invalidate(sid)
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.GET_SESSION, async (p) => {
-      const { session_id } = p as { session_id: string }
-      const res = await this.backend.callTool('sessions_get', { session_id })
-      return res.structuredContent ?? res.content ?? {}
+      // P0：默认只返回结构化摘要（~1KB）；include_messages=true 才透传完整
+      // 历史（max_messages 限条数 + before_seq 分页游标，原样透传 DSH）
+      return this.summaries.getSession(p as GetSessionParams)
     })
     this.peer.on(NODE_METHODS.RESUME_SESSION, async (p) => {
       const { session_id } = p as { session_id: string }
       const res = await this.backend.callTool('sessions_resume', { session_id })
+      // 会话被激活（状态变更会改变 continuation_available）→ 摘要缓存失效
+      if (session_id) this.summaries.invalidate(session_id)
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.PROMPT, async (p) => {
       const { session_id, message } = p as { session_id: string; message: string }
       const res = await this.backend.callTool('sessions_prompt', { session_id, message })
+      // 新消息落地 → 摘要（last_message_summary 等）过期，立即失效
+      if (session_id) this.summaries.invalidate(session_id)
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.CANCEL, async (p) => {
       const { session_id } = p as { session_id: string }
       const res = await this.backend.callTool('sessions_cancel', { session_id })
+      // 打断后状态变化（running→idle 等）→ 摘要缓存失效
+      if (session_id) this.summaries.invalidate(session_id)
       return res.structuredContent ?? res.content ?? {}
     })
     // Generic passthrough: hub routes any MCP tool here.
     this.peer.on(NODE_METHODS.MCP_CALL, async (p) => {
       const { tool, args } = p as { tool: string; args?: unknown }
+      // 线上 hub 目前经 mcp.call 转发 sessions_get（cp.forward 统一走 MCP_CALL），
+      // 必须在这里也走隔离逻辑，否则 P0 摘要不生效（GET_SESSION RPC 仅为直连路径）。
+      if (tool === 'sessions_get') {
+        return this.summaries.getSession((args ?? {}) as GetSessionParams)
+      }
       const res = await this.backend.callTool(tool, args ?? {})
       // Surface structured content to the hub (fall back to content blocks).
       return res.structuredContent ?? (res.content ? { content: res.content } : res)

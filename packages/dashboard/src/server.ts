@@ -22,6 +22,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { collectStatus, type DashboardStatus } from './status.js'
 import { buildJoinTip, fetchHubPairCode, fetchHubPairList, type HubPairListEntry } from './pair.js'
+import { DEFAULT_HUB_URL } from './hub.js'
+import { fetchMcpMetrics } from './metrics.js'
 
 export const DEFAULT_DASHBOARD_PORT = 3480
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1'
@@ -42,6 +44,8 @@ export interface DashboardServerOptions {
   statusFetcher?: () => Promise<DashboardStatus>
   /** Hub HTTP origin for pairing endpoints (default http://127.0.0.1:3471). */
   pairHubUrl?: string
+  /** Hub HTTP origin for the /api/metrics proxy (default: DEFAULT_HUB_URL). */
+  metricsHubUrl?: string
   /** Injectable tailscale IPv4 source for the join tip (default: platform probe). */
   tailscaleIpFetcher?: () => Promise<string | null>
   /** Fixed dashboard token (tests); default: random 16 bytes hex. */
@@ -61,6 +65,7 @@ function sendJson(res: http.ServerResponse, statusCode: number, data: unknown): 
 /**
  * Start the dashboard HTTP server. Routes:
  *   GET  /api/status        -> aggregated status JSON (read-only)
+ *   GET  /api/metrics       -> hub MCP metrics proxy (read-only; failure becomes { error } body)
  *   POST /api/pair          -> { code, expiresAt, tip } (X-Dashboard-Token)
  *   GET  /api/pair/status   -> { codes: [...] } (X-Dashboard-Token)
  *   OPTIONS /api/pair*      -> 204 preflight (no CORS headers: same-origin only)
@@ -72,6 +77,7 @@ export async function startDashboard(opts: DashboardServerOptions = {}): Promise
   const port = opts.port ?? DEFAULT_DASHBOARD_PORT
   const statusFetcher = opts.statusFetcher ?? collectStatus
   const pairHubUrl = opts.pairHubUrl ?? 'http://127.0.0.1:3471'
+  const metricsHubUrl = opts.metricsHubUrl ?? DEFAULT_HUB_URL
   const tailscaleIpFetcher = opts.tailscaleIpFetcher
   const dashboardToken = opts.dashboardToken ?? randomBytes(16).toString('hex')
 
@@ -94,6 +100,14 @@ export async function startDashboard(opts: DashboardServerOptions = {}): Promise
       if (req.method === 'GET' && url.pathname === '/api/status') {
         const status = await statusFetcher()
         sendJson(res, 200, status)
+        return
+      }
+      if (req.method === 'GET' && url.pathname === '/api/metrics') {
+        // 只读代理：转发 hub 的 GET /metrics。探测容错（hub 未就绪时
+        // fetchMcpMetrics 返回 { error }）不转为 5xx——与 /api/status
+        // 的「分区错误」语义一致，前端按错误行渲染。
+        const metrics = await fetchMcpMetrics(metricsHubUrl)
+        sendJson(res, 200, metrics)
         return
       }
       if (url.pathname.startsWith('/api/pair')) {

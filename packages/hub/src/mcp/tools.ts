@@ -127,10 +127,10 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'sessions_get',
-    description: 'Get session details. Routes to the session owner.',
+    description: 'Get session details. Routes to the session owner. Default returns a compact summary; pass include_messages=true for full history (max_messages/before_seq page it).',
     danger: DANGER.READ,
     sessionRouted: true,
-    schema: { type: 'object', properties: { session_id: sessionIdProp, max_messages: { type: 'number' }, target_node: targetNodeProp }, required: ['session_id'] },
+    schema: { type: 'object', properties: { session_id: sessionIdProp, include_messages: { type: 'boolean', description: 'default false: compact summary only; true: full history' }, max_messages: { type: 'number', description: 'history length cap when include_messages=true (default 20, DSH max 100)' }, before_seq: { type: 'number', description: 'pagination cursor: fetch messages older than this seq' }, target_node: targetNodeProp }, required: ['session_id'] },
   },
   {
     name: 'sessions_resume',

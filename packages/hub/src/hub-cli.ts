@@ -33,14 +33,30 @@
  *
  * HA status endpoint (loopback):
  *   GET /cp-status -> { cpId, role, term, leaderId, peers, syncOk, ... }
+ *
+ * Health/ops endpoints on the MCP HTTP server (P3):
+ *   GET /healthz -> { ok, nodes }                  (existing liveness)
+ *   GET /metrics -> McpMetrics snapshot            (size-guard + call counters)
+ *   GET /readyz  -> { ok: true } | 503 { ok: false, reason }
+ *   GET /version -> { name: 'dsh-helm-hub', version }
  */
 
 import { createServer } from 'node:http'
 import { readFileSync } from 'node:fs'
 import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceRegistry, RegistrationTokenStore } from '@dsh-helm/store'
-import { ControlPlane, HubConnection, MeshServer, HubMcpServer, PairingService, HubHa } from '@dsh-helm/hub'
+import { ControlPlane, HubConnection, MeshServer, HubMcpServer, PairingService, HubHa, McpMetrics } from '@dsh-helm/hub'
 import { CP_NODE_PREFIX, DEFAULT_CP_LEASE_RENEW_MS, DEFAULT_CP_LEASE_TTL_MS, DEFAULT_CP_PRIORITY } from '@dsh-helm/protocol'
 import { DEFAULT_PORTS } from '@dsh-helm/platform'
+
+/** hub 包版本（packages/hub/package.json），供 /version 与 /metrics 使用。 */
+const HUB_VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string }
+    return pkg.version ?? '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
 
 interface HubCliOptions {
   meshPort: number
@@ -136,7 +152,7 @@ export function isLoopbackHost(host: string): boolean {
   return host === '127.0.0.1' || host === '::1' || host === 'localhost' || host === '::ffff:127.0.0.1' || host.startsWith('127.')
 }
 
-export function startHub(opts: HubCliOptions, log: (l: string) => void = console.log): { cp: ControlPlane; mesh: MeshServer; mcp: HubMcpServer; mcpHttp: ReturnType<typeof createServer>; store: DshHelmStore; pairing: PairingService; ha: HubHa } {
+export function startHub(opts: HubCliOptions, log: (l: string) => void = console.log): { cp: ControlPlane; mesh: MeshServer; mcp: HubMcpServer; mcpHttp: ReturnType<typeof createServer>; store: DshHelmStore; pairing: PairingService; ha: HubHa; metrics: McpMetrics } {
   const store = new DshHelmStore({ file: opts.storeFile })
   const nodes = new NodeRegistry(store.db)
   const sessions = new SessionCatalog(store.db)
@@ -192,7 +208,9 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
       if (nodeId?.startsWith(CP_NODE_PREFIX)) ha.onPeerDisconnected(nodeId.slice(CP_NODE_PREFIX.length), 'inbound')
     },
   })
-  const mcp = new HubMcpServer({ cp, ha, log })
+  // MCP 调用指标（P3）：注入 MCP server，/metrics 端点从这里出数据。
+  const metrics = new McpMetrics()
+  const mcp = new HubMcpServer({ cp, ha, log, metrics })
   const mcpAddr = opts.mcpBind ?? opts.bind
   const pairEligible = isLoopbackHost(mcpAddr)
   // Streamable HTTP transport for the MCP surface (same shape as the daemon).
@@ -234,7 +252,7 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
             const call = JSON.parse(body) as { method?: string; id?: number; params?: { name?: string; arguments?: Record<string, unknown> } }
             if (call.method === 'initialize') {
               res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': `hub-${Date.now()}` })
-              res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'dsh-helm-hub', version: '0.1.0' } } }))
+              res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'dsh-helm-hub', version: HUB_VERSION } } }))
               return
             }
             if (call.method?.startsWith('notifications/')) {
@@ -271,6 +289,38 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
       res.end(JSON.stringify({ ok: true, nodes: cp.nodeCatalog().length }))
       return
     }
+    if (req.method === 'GET' && req.url === '/version') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ name: 'dsh-helm-hub', version: HUB_VERSION }))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/metrics') {
+      // activeConnections = 直接连接的节点数 + 已连接的 CP peer 数。
+      // cp.connections 不含 cp peer（peer 走 onPeerAuthenticated 分支，
+      // 不进入节点路由表），因此从 ha.statusPayload().peers 补统计。
+      const activeConnections = cp.connections.size + ha.statusPayload().peers.filter((p) => p.connected).length
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(metrics.snapshot(activeConnections, HUB_VERSION)))
+      return
+    }
+    if (req.method === 'GET' && req.url === '/readyz') {
+      // 就绪判定：standalone 直接就绪；HA 模式要求 quorum=true 且本地
+      // MCP 可用（工具表非空），否则 503 并说明原因。
+      const mcpOk = mcp.listTools().length > 0
+      if (!mcpOk) {
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, reason: 'mcp server not ready' }))
+        return
+      }
+      if (opts.cpPeers.length > 0 && !ha.quorum()) {
+        res.writeHead(503, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false, reason: `no control-plane quorum (phase=${ha.phaseValue()})` }))
+        return
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: true }))
+      return
+    }
     res.writeHead(404)
     res.end()
   })
@@ -278,7 +328,7 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
   log(`hub mesh listening on ${opts.bind}:${opts.meshPort} (hubId=${opts.hubId})`)
   ha.start()
   if (opts.cpPeers.length > 0) log(`hub HA enabled: cpId=${cpId} peers=${opts.cpPeers.join(',')} priority=${opts.cpPriority} failover=${opts.cpFailoverMs}ms`)
-  return { cp, mesh, mcp, mcpHttp, store, pairing, ha }
+  return { cp, mesh, mcp, mcpHttp, store, pairing, ha, metrics }
 }
 
 // CLI entry (only when run directly)

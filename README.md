@@ -110,6 +110,16 @@ OpenAI Platform 侧完整教程（建 tunnel / 绑定 workspace / 建 API key / 
 
 Dashboard「新增 DSH 设备」→ 生成一次性配对码（10 分钟有效、单次消费、仅存哈希）；新机器执行 `dsh-helm join --control-plane ws://<hub>:3470 --code <code>` 完成入网（生成长期 node token 写入 `~/.dsh/helm/node.json`，hub 只存 hash/状态）。配对 API 仅 loopback + 防 CSRF 头；日志只记哈希前缀。详见 [docs/security.md](docs/security.md) §5。
 
+## MCP Context Isolation（大上下文稳定性）
+
+ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦身与监控（兼容层，链路不变）：
+
+- **sessions_get 默认摘要**：默认只返回结构化摘要（`id/title/status/workspace/created_at/updated_at/last_message_summary/last_assistant_summary/token_estimate/continuation_available`，无 messages），实测大 session 响应 75KB → 1.2KB。摘要由 node agent 生成（只向 DSH 要最后 2 条消息），缓存于 `~/.dsh/helm/summaries/<session_id>.json`（60s TTL，写操作后失效）。
+- **完整历史按需取**：`include_messages=true`（可配 `max_messages` 默认 20、`before_seq` 翻页游标）返回完整消息；旧调用（不带参数）自动走摘要，行为不变。
+- **Response Size Guard**：hub 所有 MCP 响应统一 middleware，`MAX_RESPONSE_BYTES=50000`；超限自动 smart-truncate（保证仍是合法 JSON，挂 `truncated` 元数据），日志 `[mcp-guard] <tool> original=.. returned=.. truncated`。
+- **健康监控**：hub 新增 `GET /metrics`（请求数/平均与最大响应字节/截断与错误计数/活跃连接/perTool 明细）、`GET /readyz`（HA quorum 就绪）、`GET /version`；Dashboard 新增「MCP 控制面」页签展示。
+- **纠错插队设计**（评审稿）：DSH 原生支持 `mode:'steer'` 注入纠偏，转发层当前未透传；方案见 [docs/priority-queue.md](docs/priority-queue.md)，待评审实施。
+
 ## 平台支持
 
 | 平台 | hub | node agent | presence | 服务自启 |
