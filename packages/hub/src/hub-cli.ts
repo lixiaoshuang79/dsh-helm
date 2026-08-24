@@ -107,6 +107,14 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
               res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'dsh-helm-hub', version: '0.1.0' } } }))
               return
             }
+            if (call.method?.startsWith('notifications/')) {
+              // Streamable HTTP notifications (e.g. notifications/initialized):
+              // 202 Accepted, no body — required by standard MCP clients
+              // (tunnel-client probes with initialize + notifications/initialized).
+              res.writeHead(202, { 'content-type': 'application/json' })
+              res.end()
+              return
+            }
             if (call.method === 'tools/list') {
               res.writeHead(200, { 'content-type': 'application/json' })
               res.end(JSON.stringify({ jsonrpc: '2.0', id: call.id, result: { tools: mcp.listTools() } }))
