@@ -84,9 +84,11 @@ export class HubMcpServer {
       case 'projects_list':
       case 'workspaces_list': {
         const rows = await this.cp.aggregateWorkspaces()
+        const names = new Map(this.cp.nodeCatalog().map(({ node }) => [node.node_id, node.display_name]))
         const flat = rows.flatMap((r) =>
           r.workspaces.map((w) => ({
             node_id: r.node_id,
+            node_name: names.get(r.node_id) ?? r.node_id.slice(0, 8),
             workspace_id: w.native_workspace_id,
             path: w.path,
             title: w.title,
@@ -97,11 +99,13 @@ export class HubMcpServer {
       case 'sessions_list': {
         const nodeFilter = typeof args.node_id === 'string' ? args.node_id : undefined
         const rows = await this.cp.aggregateSessions()
+        const names = new Map(this.cp.nodeCatalog().map(({ node }) => [node.node_id, node.display_name]))
         const flat = rows
           .filter((r) => !nodeFilter || r.node_id === nodeFilter)
           .flatMap((r) =>
             r.sessions.map((s) => ({
               node_id: r.node_id,
+              node_name: names.get(r.node_id) ?? r.node_id.slice(0, 8),
               session_id: s.native_session_id,
               global_id: `${r.node_id}:${s.native_session_id}`,
               title: s.title,

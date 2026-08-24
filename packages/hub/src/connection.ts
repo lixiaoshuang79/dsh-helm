@@ -88,7 +88,13 @@ export class HubConnection implements NodeConnection {
     this.peer?.close()
     const nodeId = this.nodeId
     if (nodeId) {
-      this.cp.connections.delete(nodeId)
+      // Only remove THIS connection. A stale socket's close event can be
+      // processed after a newer connection under the same node_id has
+      // already registered (reconnect race); deleting unconditionally would
+      // drop the live connection from the routing map.
+      if (this.cp.connections.get(nodeId) === this) {
+        this.cp.connections.delete(nodeId)
+      }
     }
     this.onCloseCb?.(nodeId)
   }
