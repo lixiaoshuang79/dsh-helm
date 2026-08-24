@@ -109,7 +109,9 @@ export class HandshakeServer {
     this.done = true
     const err: HandshakeErrorMessage = { type: 'error', v: this.opts.schemaVersion, code, message }
     this.sender.send(err)
-    this.cb.onError(code, message)
+    // Attach the client-declared node_id when known (auth stage) so hub logs
+    // can tell "unknown node" apart from "known node, wrong token".
+    this.cb.onError(code, this.hello ? `${message} (node=${this.hello.node_id})` : message)
   }
 }
 
