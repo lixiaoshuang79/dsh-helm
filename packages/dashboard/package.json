@@ -1,13 +1,10 @@
 {
-  "name": "@dsh-helm/cli",
+  "name": "@dsh-helm/dashboard",
   "version": "0.1.0",
   "type": "module",
-  "description": "dsh-helm CLI: init/agent/hub/status/doctor/dashboard/install/nodes/route-explain/presence/rotate-token/handoff",
+  "description": "Read-only loopback control-plane dashboard (HTTP status UI)",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
-  "bin": {
-    "dsh-helm": "lib/cli.js"
-  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -19,8 +16,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dsh-helm/dashboard": "workspace:*",
-    "@dsh-helm/node-agent": "workspace:*",
     "@dsh-helm/platform": "workspace:*"
   }
 }

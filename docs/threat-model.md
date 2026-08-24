@@ -23,6 +23,8 @@
 | 3458 | 入口节点 tunnel-client 健康端口 | 无（仅 loopback） | `127.0.0.1` |
 | 3080 | DSH web | 无登录墙；靠 loopback 绑定 + trustedHosts 围栏 | `127.0.0.1` |
 
+> 注：tunnel-client 健康端口（上表 3458 为旧 connector 套件默认）可用 `--health.listen-addr` 配置，本仓库验证部署使用 `127.0.0.1:3468`——两者均为示例值，以实际部署为准（见 `docs/architecture.md` §2 端口表）。
+
 **信任边界总结**：系统整体是"本地可信、网络存疑"。节点之间永远是**星型**：Node Agent 只出站拨号 hub（`HelmNodeAgent.connect`，`ws://` 仅 loopback/test，生产 `wss://`），节点与节点之间没有任何直接通道；hub 是唯一路由者（`Router`）与唯一执行通道（`mcp.call`）。每台机器的 DSH 只通过本地 daemon 的 3457 MCP 端点（Bearer token）暴露给本机 Node Agent（`LocalHelmBackend`（默认 `McpLocalHelmBackend`）），daemon 的 unix socket adapter 协议（`~/.agent-chatgpt-helm/run/daemon.sock`，无认证）绝不上网络。
 
 ### 2.2 节点身份与握手（事实）

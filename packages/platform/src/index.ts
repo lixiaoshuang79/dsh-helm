@@ -82,6 +82,19 @@ ${envKeys}
 `
 }
 
+// ---- tailscale ----
+
+export {
+  findTailscaleCli,
+  runTailscale,
+  getTailscaleVersion,
+  getTailscaleIp,
+  parseTailscaleStatusJson,
+  getTailscaleStatus,
+  isTailscaleInstalled,
+} from './tailscale.js'
+export type { TailscaleExec, TailscaleRunResult, TailscaleSelf, TailscalePeer, ParsedStatus } from './tailscale.js'
+
 /** Windows Scheduled Task XML for the node agent (runs at logon, restarts on failure). */
 export function windowsTaskXml(taskName: string, nodeExe: string, agentCliPath: string, workDir: string): string {
   return `<?xml version="1.0" encoding="UTF-16"?>

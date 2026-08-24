@@ -1,0 +1,451 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dsh-helm Control Plane Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #11161f;
+    --panel-2: #0e131c;
+    --border: #1f2733;
+    --text: #d5dbe6;
+    --muted: #8593a7;
+    --accent: #66a3ff;
+    --ok: #45c47a;
+    --bad: #f2625e;
+    --warn: #e0b64c;
+    --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 13px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 20px clamp(12px, 3vw, 36px) 32px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  a { color: var(--accent); }
+  header { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding-bottom: 14px; border-bottom: 1px solid var(--border); margin-bottom: 18px; }
+  h1 { font-size: 16px; font-weight: 600; letter-spacing: 0.2px; }
+  h1 .host { color: var(--muted); font-weight: 400; font-family: var(--mono); font-size: 12px; margin-left: 8px; }
+  .toolbar { margin-left: auto; display: flex; align-items: center; gap: 10px; color: var(--muted); }
+  .toolbar label { display: flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+  .toolbar input[type="checkbox"] { accent-color: var(--accent); }
+  button {
+    background: #182033; color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 4px 12px; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .updated { font-family: var(--mono); font-size: 12px; }
+  .banner {
+    display: none; background: #2b1517; border: 1px solid #6b2a2c; color: #ffb3ae;
+    padding: 8px 12px; border-radius: 4px; margin-bottom: 14px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-break: break-all;
+  }
+  .banner.show { display: block; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; }
+  .card h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; }
+  .kv { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; font-size: 12px; }
+  .kv .k { color: var(--muted); flex-shrink: 0; }
+  .kv .v { text-align: right; word-break: break-all; }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 12px 14px; margin-bottom: 14px; }
+  .panel h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 10px; letter-spacing: 0.4px; }
+  .cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+  .badge {
+    display: inline-block; padding: 1px 8px; border-radius: 3px; font-size: 11px;
+    font-family: var(--mono); border: 1px solid transparent; white-space: nowrap;
+  }
+  .badge-ok { color: var(--ok); border-color: #1d4a30; background: #10291c; }
+  .badge-bad { color: var(--bad); border-color: #5c2527; background: #2b1517; }
+  .badge-warn { color: var(--warn); border-color: #5c4a1e; background: #2b2311; }
+  .badge-mute { color: var(--muted); border-color: var(--border); background: var(--panel-2); }
+  .badge-hub { color: var(--accent); border-color: #1f3a5f; background: #12202f; }
+  .err { color: var(--bad); font-size: 11px; font-family: var(--mono); word-break: break-all; }
+  .mono { font-family: var(--mono); }
+  .empty { color: var(--muted); font-size: 12px; }
+  table.data-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.data-table th, table.data-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.data-table th { color: var(--muted); font-weight: 500; font-size: 11px; white-space: nowrap; }
+  table.data-table td { word-break: break-all; }
+  table.data-table tr:last-child td { border-bottom: none; }
+  code { font-family: var(--mono); background: var(--panel-2); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-size: 11.5px; word-break: break-all; }
+  pre.log {
+    font-family: var(--mono); font-size: 11px; color: #d2996a; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px;
+    max-height: 96px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin-top: 4px;
+  }
+  footer { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>dsh-helm Control Plane Dashboard<span class="host" id="host-line"></span></h1>
+  <div class="toolbar">
+    <label><input type="checkbox" id="auto-refresh" checked>自动刷新（5s）</label>
+    <button id="refresh-btn" type="button">手动刷新</button>
+    <span class="updated" id="last-updated">未更新</span>
+  </div>
+</header>
+
+<div class="banner" id="banner"></div>
+
+<section class="cards" id="overview"></section>
+
+<section class="panel">
+  <h2>节点</h2>
+  <div id="nodes-table"></div>
+</section>
+
+<div class="cols">
+  <section class="panel">
+    <h2>Tunnel</h2>
+    <div id="tunnel-detail"></div>
+  </section>
+  <section class="panel">
+    <h2>Tailscale</h2>
+    <div id="tailscale-detail"></div>
+  </section>
+</div>
+
+<section class="panel">
+  <h2>服务</h2>
+  <div id="services-table"></div>
+</section>
+
+<footer>
+  <span>只读控制台 · 仅监听 127.0.0.1</span>
+  <span id="generated-at" class="mono"></span>
+</footer>
+
+<script>
+'use strict';
+
+const REFRESH_MS = 5000;
+const $ = (id) => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function badge(text, kind) {
+  return el('span', `badge badge-${kind}`, text);
+}
+
+function kvRow(label, valueNode) {
+  const row = el('div', 'kv');
+  row.append(el('span', 'k', label), el('span', 'v'));
+  row.lastChild.append(valueNode);
+  return row;
+}
+
+function card(title, rows) {
+  const c = el('section', 'card');
+  c.append(el('h3', null, title));
+  for (const r of rows) c.append(r);
+  return c;
+}
+
+function mono(text) {
+  return el('span', 'mono', text ?? '—');
+}
+
+function relTime(v) {
+  if (v === undefined || v === null || v === '') return '—';
+  let t;
+  if (typeof v === 'number') t = new Date(v);
+  else if (typeof v === 'string') t = new Date(v);
+  else return '—';
+  if (Number.isNaN(t.getTime())) return String(v);
+  const diff = Date.now() - t.getTime();
+  const abs = Math.abs(diff);
+  if (abs < 60 * 1000) return '刚刚';
+  if (abs < 3600 * 1000) return `${Math.floor(abs / 60000)} 分钟前`;
+  if (abs < 86400 * 1000) return `${Math.floor(abs / 3600000)} 小时前`;
+  return `${Math.floor(abs / 86400000)} 天前`;
+}
+
+function abbrevId(id) {
+  if (!id) return '—';
+  if (id.length <= 20) return id;
+  return `${id.slice(0, 8)}…${id.slice(-8)}`;
+}
+
+function platformText(p) {
+  if (!p) return '—';
+  return [p.os, p.arch, p.release].filter(Boolean).join(' ') || '—';
+}
+
+function versionsText(v) {
+  if (!v) return '—';
+  const parts = [];
+  if (v.agent) parts.push(`agent ${v.agent}`);
+  if (v.protocol) parts.push(`proto ${v.protocol}`);
+  return parts.join(' / ') || '—';
+}
+
+function capsText(caps) {
+  if (!caps) return '—';
+  const names = Object.entries(caps)
+    .filter(([, v]) => v === true || (typeof v === 'string' && v.length > 0))
+    .map(([k]) => k);
+  return names.length ? names.join('、') : '—';
+}
+
+function connBadge(n) {
+  return n.connected === true ? badge('online', 'ok') : badge('offline', 'bad');
+}
+
+function roleText(role) {
+  if (role.isHubHost && role.isNode) return 'Hub + Node';
+  if (role.isHubHost) return 'Hub 主机';
+  if (role.isNode) return 'Node';
+  return '未注册';
+}
+
+// ---- rendering ----
+
+function renderOverview(s) {
+  const c = $('overview');
+  c.textContent = '';
+  const nodes = Array.isArray(s.hub.nodes) ? s.hub.nodes : [];
+  const online = nodes.filter((n) => n.connected === true).length;
+  const ts = s.tailscale || {};
+  const tunnels = s.tunnel || {};
+  const hubErr = s.hub.error ? [kvRow('错误', el('span', 'err', s.hub.error))] : [];
+  const tunnelErr = tunnels.error ? [kvRow('错误', el('span', 'err', tunnels.error))] : [];
+  c.append(
+    card('Hub', [
+      kvRow('状态', s.hub.hubOk ? badge('正常', 'ok') : badge('异常', 'bad')),
+      kvRow('节点数', mono(String(s.hub.nodeCount ?? 0))),
+      ...hubErr,
+    ]),
+    card('Tunnel', [
+      kvRow('状态', tunnels.running ? badge('运行中', 'ok') : badge('未运行', 'bad')),
+      kvRow('就绪', tunnels.ready ? badge('ready', 'ok') : badge('未就绪', 'bad')),
+      kvRow('隧道 ID', mono(tunnels.tunnelIdRedacted || '未配置')),
+      ...tunnelErr,
+    ]),
+    card('Tailscale', [
+      kvRow('安装', ts.installed ? badge('已安装', 'ok') : badge('未安装', 'mute')),
+      kvRow('版本', mono(ts.version || '—')),
+      kvRow('IPv4', mono(ts.ipv4 || '—')),
+      kvRow('在线', ts.self?.online ? badge('online', 'ok') : badge('offline', 'bad')),
+    ]),
+    card('节点', [
+      kvRow('在线', mono(`${online} / ${nodes.length}`)),
+      kvRow('离线', mono(`${nodes.length - online}`)),
+      kvRow('hub 节点数', mono(String(s.hub.nodeCount ?? 0))),
+    ]),
+    card('本机角色', [
+      kvRow('角色', badge(roleText(s.role), s.role.isHubHost || s.role.isNode ? 'ok' : 'mute')),
+      kvRow('显示名', mono(s.role.displayName || '—')),
+      kvRow('节点 ID', mono(s.role.nodeIdRedacted || '—')),
+      kvRow('Hub URL', mono(s.role.hubUrl || '—')),
+    ]),
+  );
+}
+
+function renderNodes(s) {
+  const wrap = $('nodes-table');
+  wrap.textContent = '';
+  const nodes = Array.isArray(s.hub.nodes) ? s.hub.nodes : [];
+  if (nodes.length === 0) {
+    wrap.append(el('p', 'empty', '暂无节点信息（hub 未就绪或 nodes_list 失败）'));
+    return;
+  }
+  const table = el('table', 'data-table');
+  const head = el('tr');
+  for (const h of ['显示名', 'node_id', '状态', '最后在线', '平台', '版本', '能力']) {
+    head.append(el('th', null, h));
+  }
+  table.append(head);
+  for (const n of nodes) {
+    const tr = el('tr');
+    const nameTd = el('td');
+    nameTd.append(el('span', null, n.display_name || n.node_id));
+    if (s.role.isHubHost && s.role.displayName && n.display_name === s.role.displayName) {
+      nameTd.append(' ', badge('Hub', 'hub'));
+    }
+    tr.append(nameTd);
+    tr.append(el('td', 'mono', abbrevId(n.node_id)));
+    const st = el('td');
+    st.append(connBadge(n));
+    tr.append(st);
+    const last = el('td', 'mono', relTime(n.last_seen));
+    last.title = typeof n.last_seen === 'string' ? n.last_seen : '';
+    tr.append(last);
+    tr.append(el('td', null, platformText(n.platform)));
+    tr.append(el('td', 'mono', versionsText(n.versions)));
+    tr.append(el('td', null, capsText(n.capabilities)));
+    table.append(tr);
+  }
+  wrap.append(table);
+}
+
+function renderTunnel(s) {
+  const wrap = $('tunnel-detail');
+  wrap.textContent = '';
+  const t = s.tunnel || {};
+  const rows = [
+    kvRow('进程状态', t.running ? badge('运行中', 'ok') : badge('未运行', 'bad')),
+    kvRow('readyz', t.ready ? badge('ready', 'ok') : badge('未就绪', 'bad')),
+    kvRow('healthz', t.live ? badge('live', 'ok') : badge('异常', 'bad')),
+    kvRow('隧道 ID', t.tunnelIdRedacted ? el('code', null, t.tunnelIdRedacted) : el('span', 'mono', '未配置')),
+    kvRow('MCP 目标', t.mcpTargetUrl ? el('code', null, t.mcpTargetUrl) : el('span', 'mono', '—')),
+  ];
+  const bind = kvRow('workspace 绑定', el('span', null, '需在 OpenAI Platform 检查'));
+  rows.push(bind);
+  if (t.error) rows.push(kvRow('错误', el('span', 'err', t.error)));
+  for (const r of rows) wrap.append(r);
+}
+
+function renderTailscale(s) {
+  const wrap = $('tailscale-detail');
+  wrap.textContent = '';
+  const t = s.tailscale || {};
+  if (!t.installed) {
+    wrap.append(el('p', 'empty', '未检测到 tailscale CLI'));
+    if (t.error) wrap.append(el('p', 'err', t.error));
+    return;
+  }
+  const rows = [
+    kvRow('版本', mono(t.version || '—')),
+    kvRow('本机 IPv4', mono(t.ipv4 || '—')),
+  ];
+  if (t.self) {
+    rows.push(kvRow('主机名', t.self.hostName ? el('code', null, t.self.hostName) : el('span', 'mono', '—')));
+    rows.push(kvRow('self 在线', t.self.online ? badge('online', 'ok') : badge('offline', 'bad')));
+    if (t.self.os) rows.push(kvRow('系统', mono(t.self.os)));
+  }
+  if (t.error) rows.push(kvRow('错误', el('span', 'err', t.error)));
+  for (const r of rows) wrap.append(r);
+
+  const peers = Array.isArray(t.peers) ? t.peers : [];
+  const title = el('h3', null, 'Peers');
+  title.style.cssText = 'font-size:11px;color:var(--muted);margin:10px 0 6px;letter-spacing:.8px;text-transform:uppercase;';
+  wrap.append(title);
+  if (peers.length === 0) {
+    wrap.append(el('p', 'empty', '无 peers 信息'));
+    return;
+  }
+  const table = el('table', 'data-table');
+  const head = el('tr');
+  for (const h of ['主机名', 'IP', '在线', '系统', '最后在线']) head.append(el('th', null, h));
+  table.append(head);
+  for (const p of peers) {
+    const tr = el('tr');
+    tr.append(el('td', 'mono', p.hostName || '—'));
+    tr.append(el('td', 'mono', (p.ips || []).join(', ') || '—'));
+    tr.append(el('td', null, p.online ? badge('online', 'ok') : badge('offline', 'bad')));
+    tr.append(el('td', 'mono', p.os || '—'));
+    tr.append(el('td', 'mono', relTime(p.lastSeen)));
+    table.append(tr);
+  }
+  wrap.append(table);
+}
+
+function renderServices(s) {
+  const wrap = $('services-table');
+  wrap.textContent = '';
+  const services = Array.isArray(s.services) ? s.services : [];
+  if (services.length === 0) {
+    wrap.append(el('p', 'empty', '未检测到 dsh-helm 服务'));
+    return;
+  }
+  const table = el('table', 'data-table');
+  const head = el('tr');
+  for (const h of ['服务', 'PID', '状态', '上次退出码', '最近错误']) head.append(el('th', null, h));
+  table.append(head);
+  for (const svc of services) {
+    const tr = el('tr');
+    tr.append(el('td', 'mono', svc.label));
+    tr.append(el('td', 'mono', svc.pid === null ? '—' : String(svc.pid)));
+    tr.append(el('td', null, svc.running ? badge('running', 'ok') : badge('stopped', 'bad')));
+    tr.append(el('td', 'mono', svc.lastExit === null ? '—' : String(svc.lastExit)));
+    const errTd = el('td');
+    if (svc.recentError) {
+      const pre = el('pre', 'log', svc.recentError);
+      errTd.append(pre);
+    } else {
+      errTd.append(el('span', 'empty', '—'));
+    }
+    tr.append(errTd);
+    table.append(tr);
+  }
+  wrap.append(table);
+}
+
+let lastStatus = null;
+
+function render(s) {
+  lastStatus = s;
+  renderOverview(s);
+  renderNodes(s);
+  renderTunnel(s);
+  renderTailscale(s);
+  renderServices(s);
+  const gen = s.generatedAt;
+  $('generated-at').textContent = gen ? `generatedAt ${gen}` : '';
+}
+
+function showBanner(msg) {
+  const b = $('banner');
+  b.textContent = msg;
+  b.classList.add('show');
+}
+
+function hideBanner() {
+  $('banner').classList.remove('show');
+}
+
+async function load() {
+  const btn = $('refresh-btn');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`/api/status http ${res.status}`);
+    const status = await res.json();
+    render(status);
+    hideBanner();
+    $('last-updated').textContent = `最后更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+  } catch (err) {
+    showBanner(`拉取状态失败：${err.message}`);
+    if (lastStatus) {
+      $('last-updated').textContent = `最后更新 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}（显示缓存数据）`;
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+let timer = null;
+function startAutoRefresh() {
+  stopAutoRefresh();
+  timer = setInterval(load, REFRESH_MS);
+}
+function stopAutoRefresh() {
+  if (timer !== null) clearInterval(timer);
+  timer = null;
+}
+
+const hostLine = $('host-line');
+hostLine.textContent = `${location.hostname} · 本机 ${navigator.platform || ''}`.trim();
+
+$('auto-refresh').addEventListener('change', (e) => {
+  if (e.target.checked) startAutoRefresh();
+  else stopAutoRefresh();
+});
+$('refresh-btn').addEventListener('click', load);
+
+startAutoRefresh();
+load();
+</script>
+</body>
+</html>

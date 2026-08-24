@@ -29,9 +29,21 @@ importers:
 
   packages/cli:
     dependencies:
+      '@dsh-helm/dashboard':
+        specifier: workspace:*
+        version: link:../dashboard
       '@dsh-helm/node-agent':
         specifier: workspace:*
         version: link:../node-agent
+      '@dsh-helm/platform':
+        specifier: workspace:*
+        version: link:../platform
+
+  packages/dashboard:
+    dependencies:
+      '@dsh-helm/platform':
+        specifier: workspace:*
+        version: link:../platform
 
   packages/hub:
     dependencies:

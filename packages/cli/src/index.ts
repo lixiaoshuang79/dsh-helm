@@ -1,2 +1,7 @@
-export { parseArgs, render, HELP_TEXT, handoffV1, defaultOutput } from './cli.js'
+export { parseArgs, render, HELP_TEXT, handoffV1, defaultOutput, statusTailscaleLines } from './cli.js'
 export type { CliArgs, CliCommand } from './cli.js'
+export { runDoctor, redactToken, redactNodeId, redactTunnelId, parseTunnelIdFromPlist, nodeVersionSatisfies, readLocalNodeConfig, isPortListening, runCommand } from './doctor.js'
+export type { DoctorOptions, DoctorSection, DoctorLine, SectionStatus, LocalNodeConfig, RunFn, RunResult } from './doctor.js'
+export { runDashboard, DEFAULT_DASHBOARD_PORT, DEFAULT_DASHBOARD_HOST } from './dashboard.js'
+export { runInstall } from './install.js'
+export type { InstallOptions } from './install.js'

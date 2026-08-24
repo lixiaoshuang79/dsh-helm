@@ -2,17 +2,17 @@
 
 适用场景：入口机器已跑 Hub（mesh WS 3470 + MCP 3471，WSS 或经 SSH 隧道/内网可达），现在要把一台新机器（macOS 或 Windows）作为节点接入，让 ChatGPT 能在同一个入口上发现、路由并操作这台新机器上的 DSH 会话与工作区。
 
-本文所有命令与事实对应 `packages/` 实现（v0.1.0 / 协议 schema v1）；配套阅读 `docs/architecture.md`（架构）与 `docs/threat-model.md`（威胁模型）。
+本文所有命令与事实对应 `packages/` 实现（v0.1.0 / 协议 schema v1）；配套阅读 `docs/architecture.md`（架构）、`docs/threat-model.md`（威胁模型）与 `docs/security.md`（安全操作手册）。多机组网建议用 Tailscale（见 [§1](#1-前置条件) 选项 D 与 [security.md](security.md#3-tailscale-组网建议)）；接入 ChatGPT 的隧道与连接器教程见 `docs/chatgpt-tunnel-setup.md` 与 `docs/chatgpt-connector.md`；故障排查见 `docs/troubleshooting.md`。
 
 ## 0. 总体流程（七步）
 
 ```
-1. 前置条件检查（Node.js / pnpm / hub 可达性）
-2. 安装 dsh-helm（clone 仓库 或 npm 包，二选一）
+1. 前置条件检查（Node.js / pnpm / hub 可达性：内网、WSS、SSH 隧道或 Tailscale）
+2. 安装 dsh-helm（install.sh 或 clone 仓库，二选一）
 3. dsh-helm init 生成身份（node_id + token，0600）
-4. hub 侧注册 token（DSH_HELM_TOKEN 注入）
-5. dsh-helm-agent 前台验证 → 配置开机自启
-6. 验证（nodes list / supervisor_health 分层 / 聚合列表）
+4. hub 侧注册 token（register-node.sh 首选 / DSH_HELM_TOKEN 注入）
+5. dsh-helm-agent 前台验证 → 配置开机自启（macOS: install-service.sh）
+6. 验证（health.sh / nodes list / supervisor_health 分层 / 聚合列表）
 7. 配置 presence（macOS 自动 / Windows 适配 / 浏览器扩展）
 ```
 
@@ -26,7 +26,7 @@
 | 本地 DSH + helm daemon | 新机器上先装好 deepseek-harness 与 `@beforewave/dsh-chatgpt-helm` 插件（daemon 监听 `127.0.0.1:3457`，`/healthz` 免认证可探） | `curl -s http://127.0.0.1:3457/healthz` |
 | 防火墙 | **只需要出站**（agent 拨号 hub）；hub 侧需入站可达 3470/3471 | — |
 
-**hub 地址三选一（决定 `hub_url`）**：
+**hub 地址四选一（决定 `hub_url`）**：
 
 ```bash
 # A. SSH 隧道（推荐：hub 默认只绑 127.0.0.1，隧道无需改 hub 配置；ws 明文只在隧道内）
@@ -35,6 +35,14 @@ ssh -N -L 3470:127.0.0.1:3470 <user>@<hub-机器>        # 新机器上执行
 
 # B. WSS 域名（hub 侧已配 DSH_HELM_BIND=0.0.0.0 + TLS 反代终止 wss）→ hub_url = wss://helm.example.com/
 # C. 可信内网直连（仅限完全可信的 LAN；ws 明文可被同网段嗅探，见威胁模型 T1）→ hub_url = ws://192.168.x.x:3470
+
+# D. Tailscale（推荐多机方案；hub 只绑 tailnet IP，ACL 最小化见 security.md §3）
+#   各机 tailscale up 加入同一 tailnet；hub 机：
+#     dsh-helm hub --bind 100.x.x.x --mcp-bind 127.0.0.1     （示例 tailnet IP）
+#   节点机验证：tailscale status 互见 + nc -zv <hub-tailnet-ip> 3470
+#   hub_url = ws://100.x.x.x:3470
+#   ⚠️ hub 只绑 tailnet IP 时，本机 agent 的 hub_url 也要用 tailnet IP（loopback 与
+#      tailnet IP 是两个监听面，别混；端口不通排查见 troubleshooting.md §5）
 ```
 
 > ⚠️ 明文 `ws://` 只允许 loopback/SSH 隧道/可信内网；跨不可信网络必须 `wss://`（`node-agent/src/config.ts` 与架构决策 2）。
@@ -45,11 +53,13 @@ ssh -N -L 3470:127.0.0.1:3470 <user>@<hub-机器>        # 新机器上执行
 
 ```bash
 git clone <dsh-helm 仓库地址> ~/dsh-helm && cd ~/dsh-helm
-pnpm install
-pnpm build        # tsc -b packages/*/tsconfig.json，产物在 packages/*/lib/
-# 安装 bin 到 PATH（可选，方便后续命令）
-pnpm --filter @dsh-helm/hub --filter @dsh-helm/node-agent link --global
+./scripts/install.sh     # 推荐：node 检查 + pnpm install/build + 写 ~/.local/bin 三个 wrapper（幂等）
+# 等价的手工路径（如不想用 install.sh）：
+#   pnpm install && pnpm build
+#   pnpm --filter @dsh-helm/hub --filter @dsh-helm/node-agent link --global
 ```
+
+> 若 `~/.local/bin` 不在 PATH：`export PATH="$HOME/.local/bin:$PATH"`（或写入 `~/.zshrc`）。`doctor` 自检命令正在开发中，届时可一键检查本机部署（当前用 `./scripts/verify.sh`）。
 
 ### 路径 B：npm 包（发布/打包分发后）
 
@@ -98,13 +108,19 @@ ls -l ~/.dsh/helm/node.json        # 期望 -rw-------（0600）
 hub 的 token 表 v1 由 **`DSH_HELM_TOKEN` 环境变量**注入（`hub-cli.ts` 的 `tokenLookupFromEnv`：`node_id=token,...` 逗号分隔）。在**入口机器**上：
 
 ```bash
-# 1. 在 hub 进程的环境里加入新节点（与已有节点并存）
-export DSH_HELM_TOKEN="<已有node_id>=<已有token>,<新node_id>=<新token>"
+# 首选：register-node.sh 自动完成 探测 → 追加/更新 → 重启服务（幂等）
+# 参数来自新节点机的 ~/.dsh/helm/node.json（node_id 与 token，经 ssh/scp 安全传递）
+./scripts/register-node.sh <新node_id> <新token>
 
-# 2. 启动/重启 hub（mesh 3470 + MCP 3471；默认 bind 127.0.0.1）
+# 等价的手工做法（launchd 场景不需要；仅前台 hub 时用）：
+export DSH_HELM_TOKEN="<已有node_id>=<已有token>,<新node_id>=<新token>"
 dsh-helm-hub --mesh-port 3470 --mcp-port 3471 --store ~/.dsh/helm/store.sqlite3 \
-    [--default-node <hub自身node_id>] [--bind 0.0.0.0]   # --bind 0.0.0.0 仅 WSS 反代场景
+    [--default-node <hub自身node_id>] [--bind 0.0.0.0] [--mcp-bind 127.0.0.1]
+#   --bind 0.0.0.0 仅 WSS 反代场景；多机（Tailscale）用 --bind <tailnet-ip>；
+#   --mcp-bind 127.0.0.1 让 MCP 保持 loopback，与 mesh 绑定解耦（推荐）
 ```
+
+`register-node.sh` 会优先探测 launchd 服务（`com.dsh-helm.hub*` plist 的 `EnvironmentVariables.DSH_HELM_TOKEN`），更新后自动 bootout/bootstrap 重载；无 launchd 时退回当前 shell 环境并提示手动重启 hub。
 
 要点与说明：
 
@@ -130,7 +146,14 @@ dsh-helm-agent --hub ws://127.0.0.1:3470
 
 ### 5.2 macOS：launchd（模板在 `@dsh-helm/platform` 的 `launchdPlist`：RunAtLoad + KeepAlive）
 
-`~/Library/LaunchAgents/com.dsh-helm.node-agent.plist`（按实际路径填 node 与 agent-cli）：
+**推荐直接用脚本**（自动生成 plist + bootstrap + 验证，幂等）：
+
+```bash
+./scripts/install-service.sh           # 安装/重装（label: com.dsh-helm.node-agent）
+./scripts/install-service.sh --stop    # 停止并卸载
+```
+
+手工模板（`~/Library/LaunchAgents/com.dsh-helm.node-agent.plist`，按实际路径填 node 与 agent-cli）：
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -224,6 +247,10 @@ systemctl --user status dsh-helm-node-agent
 新节点上线后，在**入口机器**（或任一能访问 hub MCP 3471 的机器）验证（也可以只用 CLI：`dsh-helm nodes list` / `node get` / `route-explain`）：
 
 ```bash
+# 0. 快速总览（走 hub MCP supervisor_health，内部已处理 initialize）
+./scripts/health.sh                 # 节点状态表：node_id / name / status / channel / adapter / datapath
+./scripts/verify.sh                 # 本机部署自检（0 全绿 / 1 警告 / 2 严重）
+
 # 1. hub 健康（control 层）
 curl -s http://127.0.0.1:3471/healthz        # {"ok":true,"nodes":N}，N 应含新节点
 
@@ -282,6 +309,8 @@ presence 影响**未显式指定目标**的调用路由（第 4 优先级）。�
 5. **DSH web（3080）无认证**：只绑 loopback + trustedHosts 围栏——不要在公网反代 3080；本机浏览器/恶意扩展仍能碰它（威胁模型 T12）。本地代理同理：若新机器还要跑 ChatGPT 隧道，`tunnel-client` 必须带 `HTTPS_PROXY=<local-proxy>`（出网代理），凭据从 `~/.dsh/.credentials.yaml` 以 `env:` 语法注入。
 
 ## 10. 常见问题排查表
+
+> 更完整的「症状 → 排查 → 解决」手册（含 tunnel not ready、插件页看不到 tunnel、节点半开 offline、Tailscale 端口不通、MCP 直连 curl 返回空等真实踩坑）见 [troubleshooting.md](troubleshooting.md)。
 
 | 症状 | 原因 | 处理 |
 |---|---|---|

@@ -27,6 +27,26 @@ describe('parseArgs', () => {
     expect(a.command).toBe('init')
     expect(a.args).toEqual([])
   })
+
+  it('parses doctor with --hub and --tunnel-health', () => {
+    const a = parseArgs(['doctor', '--hub', 'http://127.0.0.1:3471', '--tunnel-health', 'http://127.0.0.1:3468'])
+    expect(a.command).toBe('doctor')
+    expect(a.args).toEqual([])
+    expect(a.flags['hub']).toBe('http://127.0.0.1:3471')
+    expect(a.flags['tunnel-health']).toBe('http://127.0.0.1:3468')
+  })
+
+  it('parses dashboard with --port', () => {
+    const a = parseArgs(['dashboard', '--port', '3481'])
+    expect(a.command).toBe('dashboard')
+    expect(a.flags['port']).toBe('3481')
+  })
+
+  it('parses install', () => {
+    const a = parseArgs(['install'])
+    expect(a.command).toBe('install')
+    expect(a.args).toEqual([])
+  })
 })
 
 describe('render', () => {
@@ -50,7 +70,7 @@ describe('handoff v1', () => {
 
 describe('help', () => {
   it('documents all commands', () => {
-    for (const cmd of ['init', 'agent', 'hub', 'status', 'nodes', 'route-explain', 'presence', 'rotate-token', 'handoff', 'verify']) {
+    for (const cmd of ['init', 'agent', 'hub', 'status', 'doctor', 'dashboard', 'install', 'nodes', 'route-explain', 'presence', 'rotate-token', 'handoff', 'verify']) {
       expect(HELP_TEXT).toContain(cmd)
     }
   })

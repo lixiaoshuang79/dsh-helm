@@ -6,6 +6,9 @@
  *   agent                Run the node agent (foreground)
  *   hub                  Run the hub (mesh + MCP, foreground)
  *   status               Local config + connection status
+ *   doctor               Run local diagnostics (read-only report)
+ *   dashboard            Start the web dashboard (port 3480)
+ *   install              Check prerequisites + installation guide
  *   nodes list           List nodes (from hub store)
  *   node get <id>        One node detail
  *   route-explain        Explain routing for an op
@@ -20,13 +23,20 @@
  */
 
 import { loadConfig } from '@dsh-helm/node-agent'
+import { findTailscaleCli, getTailscaleIp, getTailscaleVersion } from '@dsh-helm/platform'
 import { spawnSync } from 'node:child_process'
+import { runDoctor } from './doctor.js'
+import { runDashboard } from './dashboard.js'
+import { runInstall } from './install.js'
 
 export type CliCommand =
   | 'init'
   | 'agent'
   | 'hub'
   | 'status'
+  | 'doctor'
+  | 'dashboard'
+  | 'install'
   | 'nodes'
   | 'node'
   | 'route-explain'
@@ -78,7 +88,7 @@ export function parseArgs(argv: string[]): CliArgs {
 }
 
 function isCommand(c: string): c is CliCommand {
-  return ['init', 'agent', 'hub', 'status', 'nodes', 'node', 'route-explain', 'presence', 'target', 'rotate-token', 'handoff', 'verify', 'help'].includes(c)
+  return ['init', 'agent', 'hub', 'status', 'doctor', 'dashboard', 'install', 'nodes', 'node', 'route-explain', 'presence', 'target', 'rotate-token', 'handoff', 'verify', 'help'].includes(c)
 }
 
 export const HELP_TEXT = `dsh-helm — DSH ChatGPT Helm multi-node control plane
@@ -90,6 +100,10 @@ Commands:
   agent                    Run the node agent (connects to hub)
   hub                      Run the hub (mesh WS + MCP server)
   status                   Show local config and hub connection status
+  doctor [--hub URL] [--tunnel-health URL]
+                           Run local diagnostics (read-only report)
+  dashboard [--port N]    Start the web dashboard (default port 3480)
+  install                  Check prerequisites + installation guide
   nodes list               List nodes known to the hub
   node get <node_id>       Show one node with health
   route-explain <op> [--session-id X] [--workspace W] [--target-node N]
@@ -121,6 +135,15 @@ export function defaultOutput(): string {
   ].join('\n')
 }
 
+/** status 增强：tailscale 版本/IP（已安装时），只读、无失败路径。 */
+export function statusTailscaleLines(): string[] {
+  const cli = findTailscaleCli()
+  if (!cli) return []
+  const ver = getTailscaleVersion(cli)
+  const ip = getTailscaleIp(cli)
+  return [`tailscale: ${ver ? `v${ver}` : '已安装'}${ip ? ` ip=${ip}` : ''}`]
+}
+
 function tryLoad() {
   try {
     return loadConfig()
@@ -141,7 +164,7 @@ export function handoffV1(sessionId: string, toNode: string): { supported: false
 
 /** Main dispatch: dsh-helm <command>. (Agent/hub commands are thin executors
  *  that shell out to the runtimes via their package bins.) */
-export function main(argv: string[]): number {
+export async function main(argv: string[]): Promise<number> {
   const parsed = parseArgs(argv)
   switch (parsed.command) {
     case 'help':
@@ -154,9 +177,21 @@ export function main(argv: string[]): number {
       console.log(`hub_url: ${cfg.hub_url || '(set via --hub / DSH_HELM_HUB at agent start)'}`)
       return 0
     }
-    case 'status':
-      console.log(defaultOutput())
+    case 'status': {
+      console.log([defaultOutput(), ...statusTailscaleLines()].join('\n'))
       return 0
+    }
+    case 'doctor':
+      return runDoctor(parsed.args, {
+        hubUrl: flagString(parsed.flags['hub']),
+        tunnelHealthUrl: flagString(parsed.flags['tunnel-health']),
+      })
+    case 'dashboard':
+      await runDashboard(parsed.args, parsed.flags)
+      // 成功时 runDashboard 永久挂起（前台常驻）；失败时保留 process.exitCode
+      return Number(process.exitCode ?? 0)
+    case 'install':
+      return runInstall(parsed.args, { hubUrl: flagString(parsed.flags['hub']) })
     case 'handoff': {
       const [sessionId, toNode] = parsed.args
       if (!sessionId || !toNode) {
@@ -192,7 +227,16 @@ function execBin(name: string, args: string[]): number {
   return res.status ?? 1
 }
 
+function flagString(v: string | boolean | undefined): string | undefined {
+  return typeof v === 'string' ? v : undefined
+}
+
 const isMain = process.argv[1] && (process.argv[1].endsWith('cli.js') || process.argv[1].endsWith('dsh-helm'))
 if (isMain) {
-  process.exit(main(process.argv.slice(2)))
+  main(process.argv.slice(2))
+    .then((code) => process.exit(code))
+    .catch((err) => {
+      console.error(err)
+      process.exit(1)
+    })
 }

@@ -31,6 +31,41 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
 
 ## 2. 架构图
 
+### 2.0 真实部署链路（ChatGPT → DSH，端到端）
+
+下述链路为实际部署验证的完整路径（Tailscale 组网 + OpenAI Secure MCP Tunnel 接入）：
+
+```
+ChatGPT Web（连接器/插件，对话里选连接器）
+   │ ① OpenAI Secure MCP Tunnel（OpenAI 托管端点，TLS）
+   ▼
+tunnel-client（入口节点本机进程；出站轮询 api.openai.com，经本地 HTTPS 代理；
+              健康端口 127.0.0.1:3468，示例值可配置）
+   │ ② Streamable HTTP MCP（initialize → tools/list → tools/call）
+   ▼
+Hub 控制平面（dsh-helm hub）
+   ├─ MCP  server 127.0.0.1:3471  ←── ② 的落点（ChatGPT 唯一入口；默认 loopback 无鉴权）
+   ├─ mesh server <tailnet-ip>:3470 ←─ ③ 节点出站拨号落点（HMAC 挑战握手）
+   └─ Router：explicit target → session owner → workspace owner → presence → default
+        │ ④ mcp.call 转发（转发前剥离 target_node；回复附 _route，含 node_name）
+        ├───────────────┬───────────────┬───────────────┐
+        ▼               ▼               ▼               ▼
+   node-agent A    node-agent B    node-agent C    ……（每台机器一个，只出站）
+        │ ⑤ 本地 MCP（127.0.0.1:3457/mcp，Bearer token）
+        ▼
+   helm daemon（@beforewave，0.1.1 固定）──▶ 本机 DSH（sessions/workspaces/serena）
+```
+
+段落说明：
+
+- ① 段：tunnel 与 ChatGPT workspace 绑定、tunnel-client 参数与代理配置见 `docs/chatgpt-tunnel-setup.md`；连接器创建见 `docs/chatgpt-connector.md`。
+- ② 段：hub MCP 是 Streamable HTTP（`/mcp` + `/healthz`）；必须先 `initialize` 拿 `mcp-session-id`（直接 curl tools/list 返回空/报错属正常，见 `docs/troubleshooting.md`）。
+- ③ 段：节点与 hub 之间是星型，节点**只出站**（HMAC 握手后注册+心跳）；mesh 生产必须 `wss://`，内网/Tailscale 可用 `ws://`（信任网络内）。
+- ④ 段：路由决策细节见 §5；每次转发结果附 `_route`（含 `node_name` = display_name，缺省回退 node_id 前 8 位），供 ChatGPT 侧溯源「哪台机器执行了」。
+- ⑤ 段：node agent 只走 daemon 的 3457 认证 MCP 端点，**绝不**在网络上传 daemon 的 loopback unix socket 协议（决策 2/13）。
+
+### 2.1 控制平面组件图（详细）
+
 ```
                         ┌──────────────────────────────────────────────┐
                         │                   ChatGPT                     │
@@ -79,15 +114,15 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
    └───────────────────────────────────────────────────────────────┘
 ```
 
-**端口约定**（`packages/platform` 与 `packages/protocol` 的常量，单点事实来源）：
+**端口约定**（`packages/platform` 与 `packages/protocol` 的常量，单点事实来源；tunnel-client 端口为其自身参数，可配置）：
 
 | 端口 | 用途 |
 |------|------|
-| 3470 | Hub WebSocket mesh server（节点出站拨号入口，仅 loopback/test 用明文 ws） |
-| 3471 | Hub MCP server（ChatGPT 隧道入口，唯一连接器入口） |
+| 3470 | Hub WebSocket mesh server（节点出站拨号入口；hub-cli 默认绑定 `127.0.0.1`，跨机用 `--bind <tailnet-ip>`；仅 loopback/test 用明文 ws，生产 wss） |
+| 3471 | Hub MCP server（ChatGPT 隧道入口，唯一连接器入口；`--mcp-bind` 可与 mesh 绑定解耦，保持仅 loopback） |
 | 3472 | 本地 presence listener（127.0.0.1，接收 browser 扩展等本地上报） |
 | 3457 | 每台机器本地 helm daemon MCP（`/mcp` + `/healthz`，仅 127.0.0.1） |
-| 3458 | 入口节点 tunnel-client 健康探针（仅 127.0.0.1） |
+| 3468 | 入口节点 tunnel-client 健康端口（示例值，`--health.listen-addr` 可配置；旧 connector 套件 keepalive 探针用 3458） |
 | 3080 | DSH web（信息性；Node Agent 不直接访问，一切经 daemon MCP 语义） |
 
 ## 3. 组件详解
@@ -120,7 +155,7 @@ dsh-helm 是把已验证的单机「ChatGPT ↔ DSH」桥（dsh-chatgpt-connecto
 - **`HealthAggregator`**（`health.ts`）：分层健康聚合，绝不折叠为单一 `status: ok`（见 §7.4）。
 - **`MeshServer`**（`mesh.ts`）：生产 WS 传输，监听 3470；TLS 由调用方负责（传入 `https` server 或反代），明文 ws 仅 loopback/dev/test；每个 socket 配一个 `HubConnection`。
 - **`HubConnection`**（`connection.ts`）：连接侧胶水——`HandshakeServer` + `RpcPeer`（hub 侧 RPC handler 表）→ 认证后注册为活动 `NodeConnection`。
-- **`HubMcpServer`**（`mcp/server.ts`）：ChatGPT 隧道入口（3471）的 MCP 服务。discovery 工具 hub 本地聚合应答；可路由工具经 Router 决策后 `forward` 到目标节点（转发前剥离 `target_node` 控制参数，结果附带 `_route` 决策）；`presence_claim`/`presence_release` hub 本地处理。**单机兼容模式**：当只有一个节点且 `node_id == hub defaultNodeId` 时，路由的 explicit/session/workspace/default 全部收敛到该节点，行为与单机 daemon 完全一致。
+- **`HubMcpServer`**（`mcp/server.ts`）：ChatGPT 隧道入口（3471）的 MCP 服务。discovery 工具 hub 本地聚合应答；可路由工具经 Router 决策后 `forward` 到目标节点（转发前剥离 `target_node` 控制参数，结果附带 `_route` 决策，`_route.node_name` = 目标节点 display_name、缺省回退 node_id 前 8 位，供 ChatGPT 侧溯源执行节点）；`presence_claim`/`presence_release` hub 本地处理。**单机兼容模式**：当只有一个节点且 `node_id == hub defaultNodeId` 时，路由的 explicit/session/workspace/default 全部收敛到该节点，行为与单机 daemon 完全一致。
 - **MCP 工具面**（`mcp/tools.ts`，决策 14）：24 个工具 = **19 个兼容工具原样保留**（snake_case，与单机 daemon 一致：`code_read_file`/`code_list_dir`/`code_find_file`/`code_search_for_pattern`/`code_get_symbols_overview`/`code_find_symbol`/`code_find_referencing_symbols`/`code_use_workspace`/`projects_list`/`supervisor_health`/`agents_list`/`workspaces_list`/`sessions_create`/`sessions_list`/`sessions_get`/`sessions_resume`/`sessions_prompt`/`sessions_wait`/`sessions_cancel`）+ **5 个新增**：`nodes_list`、`node_get`、`route_explain`、`presence_claim`、`presence_release`。所有**可路由工具增加可选 `target_node` 参数**（显式目标，永不与 daemon 自身参数混淆）。`supervisor_health` 扩展为返回 control 层 + 各节点分层健康（并保留 `tunnel: {managed:false}` 等兼容字段）。
 
 ### 3.4 `@dsh-helm/node-agent` —— 每台机器的节点代理
@@ -375,7 +410,7 @@ Node Agent                                          Hub
 
 ### 8.2 connector/tunnel 保留（additive，不是替代）
 
-每台机器的 connector/tunnel 继续以单机兼容基线运行：`../connector/`（dsh-chatgpt-connector worktree）是**单机兼容基线 bash 套件**——install/uninstall/verify、tunnel-client keepalive（15s 探针 + 自动拉起）、dsh-web-watchdog（受控重启），launchd 模板、`credentials.example.yaml`、`helm-tunnel.patch.yml`（tunnelEnabled:false）与故障注入测试套件。控制平面不替代它；入口节点上 tunnel 仍由该套件管理（3458 健康），Hub MCP（3471）成为新的隧道对接面。长期方向是单一 Connector/Hub，但**每个节点保留安全兼容模式**。
+每台机器的 connector/tunnel 继续以单机兼容基线运行：`../connector/`（dsh-chatgpt-connector worktree）是**单机兼容基线 bash 套件**——install/uninstall/verify、tunnel-client keepalive（15s 探针 + 自动拉起）、dsh-web-watchdog（受控重启），launchd 模板、`credentials.example.yaml`、`helm-tunnel.patch.yml`（tunnelEnabled:false）与故障注入测试套件。控制平面不替代它；入口节点上 tunnel 仍由该套件管理（健康探针端口示例 3468，旧默认 3458），Hub MCP（3471）成为新的隧道对接面。长期方向是单一 Connector/Hub，但**每个节点保留安全兼容模式**。
 
 ### 8.3 安全模型延续
 

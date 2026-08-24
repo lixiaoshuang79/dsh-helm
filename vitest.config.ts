@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('.', import.meta.url))
-const pkgs = ['protocol', 'store', 'hub', 'node-agent', 'presence', 'platform', 'cli']
+const pkgs = ['protocol', 'store', 'hub', 'node-agent', 'presence', 'platform', 'cli', 'dashboard']
 
 export default defineConfig({
   resolve: {
