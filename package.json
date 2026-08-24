@@ -15,7 +15,8 @@
     "test:integration": "vitest run tests/integration",
     "clean": "rm -rf packages/*/lib",
     "lint": "eslint \"packages/*/src/**/*.ts\" \"packages/*/tests/**/*.ts\" \"tests/**/*.ts\"",
-    "validate": "npm run typecheck && npm run lint && npm run test"
+    "validate": "npm run typecheck && npm run lint && npm run test",
+    "prepare": "pnpm build"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
