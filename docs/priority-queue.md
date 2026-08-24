@@ -1,7 +1,12 @@
 # P4 设计评审：纠错指令插队 —— sessions_interrupt / priority queue 可行性
 
-> 状态：设计评审（2026-08-24）。按用户要求"先设计评审，不一定立即大改"，
-> 本文档只做调研与方案设计，不包含实现。评审通过后再实施。
+> 状态：**已实施（2026-08-24）**。评审通过后按方案 A 实施并验收（commit 见 §5）。
+> 实施中实测修正了评审稿两处假设：① hub 线上转发 `sessions_prompt` 走
+> `NODE_METHODS.MCP_CALL`（cp.forward 统一转发），**不是** PROMPT RPC——因此 agent
+> 的 MCP_CALL handler 也必须拦截（与 sessions_get 同款双入口）；② DSH 的
+> `mode` 枚举**官方只有 `queue` / `steer` 两个值**（无 'normal'），且 MCP 工具层
+> `sessions_prompt` 不透传 mode——steer 必须经 DSH **宿主 API**
+> （`http://127.0.0.1:3080/api/session.prompt`，loopback 无鉴权）调用。
 
 ## 1. 问题定义
 
@@ -38,16 +43,27 @@ ChatGPT ↔ DSH MCP Connector 链路中，一个长任务（如大上下文代�
 
 ## 4. 方案设计
 
-### 方案 A（推荐）：透传 `mode`，不新增工具
+### 方案 A（已实施）：`mode` 透传 + 宿主 API steer，不新增工具
 
-- hub `sessions_prompt` schema 增加可选参数 `mode: 'normal' | 'steer'`（默认 `normal`，
-  缺省行为不变 → 向后兼容）；
-- agent PROMPT handler 把 `mode` 透传给 DSH `sessions_prompt`；
-- 上游（ChatGPT connector / 后续编排层）在**检测到目标 session 正在生成**时，
-  用 `mode:'steer'` 发纠错指令；
-- 返回值透传 DSH 语义：`steer-unavailable`（窗口关闭）→ 调用方回退普通排队。
+- hub `sessions_prompt` schema 增加可选参数 `mode: 'queue' | 'steer'`（默认 `queue`，
+  缺省行为逐字节不变 → 向后兼容）；
+- agent 在 MCP_CALL 与 PROMPT RPC **双入口**拦截 `sessions_prompt`：`mode:'steer'`
+  时经 DSH 宿主 API `session.prompt`（`{sessionId, mode:'steer',
+  content:[{type:'text',text}]}`）注入运行中回合；缺省/`queue` 走原 MCP 工具层路径；
+- 返回**结构化状态**（不 throw）：
+  `{status:'steered', session_was_running, accepted}` /
+  `{status:'rejected', code, reason}`（DSH 明确拒绝：steer-unavailable 窗口关闭、
+  session-not-found、bad-request 等）/ `{status:'unavailable', reason}`（宿主 API
+  不可达/超时/响应异常）；
+- 提交前用 `session.list` 的 `running` 标志探测会话运行状态（探测失败按空闲处理，
+  附 `probe_error` 标注）；steer 成功后摘要缓存立即失效；
+- 安全边界：steer 不绕过 DSH 的权限/审批（`approval/policy`、`permission/preset`
+  sandbox 事件由 DSH 自身维持）；hub 端 danger=DESTRUCTIVE 不变；`sessions_cancel`
+  仍作为"停止"语义保留，**不**推荐 cancel+prompt 拼插队（会丢弃进行中结果）。
 
-改动量：hub schema 1 处 + agent 透传 1 处 + 测试。风险最低，完全兼容。
+实现：`packages/hub/src/mcp/tools.ts`（schema）、`packages/node-agent/src/steer.ts`
+（新增，宿主 API 封装 + 状态机）、`packages/node-agent/src/agent.ts`（双入口分流）、
+`packages/node-agent/src/config.ts`（`host_api_url`，默认 http://127.0.0.1:3080）。
 
 ### 方案 B：新增 `sessions_interrupt` 工具
 
@@ -64,16 +80,25 @@ ChatGPT ↔ DSH MCP Connector 链路中，一个长任务（如大上下文代�
   重复实现且看不到 DSH 内部执行状态，无法正确判断"该插还是该排"；② 增加 hub 状态
   与 HA 同步负担（队列状态要跨 CP 复制）；③ 与"不重构、兼容层"原则冲突。
 
-## 5. 验收口径（评审通过后的实施计划）
+## 5. 验收结果（2026-08-24 全部通过）
 
-1. hub `sessions_prompt` 支持 `mode`（schema + 透传），旧调用（无 mode）行为逐字节不变；
-2. agent 测试：fake backend 断言 `mode:'steer'` 被透传；缺省时参数不变；
-3. 真实 smoke：对运行中 session 发 `mode:'steer'`，验证打断生效
-   （steer-unavailable 或 steering 态返回）；
-4. `sessions_interrupt`（方案 B）视 connector 编排需要再决定是否实施——**默认不做**，
-   避免与 steer 语义重叠；文档保留。
+1. hub `sessions_prompt` 支持 `mode`（schema enum + 双入口透传），旧调用（无 mode）
+   行为逐字节不变 ✓（e2e 断言 args 原样透传 + 单测）；
+2. 两种模式测试：queue 默认走 MCP 工具层（断言无 mode 参数透传）✓；steer 走宿主 API
+   （断言 envelope/payload/content blocks 形状）✓；
+3. 运行中 session：集成测试 mock running=true → steered+session_was_running=true ✓；
+   **真实全链路 smoke**（hub→agent→宿主 API→DSH）：长任务运行中发
+   `mode:'steer'` → 返回 `{"status":"steered","session_was_running":true}`，DSH 历史
+   事件流出现 `agent/inbox/spliced`（注入标记）且 turn 递增 ✓；
+4. 队列顺序：queue 语义不变（DSH 队列 FIFO，agent 不干预）✓；
+5. 异常恢复：宿主 API 不可达 → `unavailable`（不 throw、不毒化连接，随后 queue
+   调用正常）✓；e2e broken 响应后恢复 ✓；
+6. `sessions_interrupt`（方案 B）不实施，与 steer 语义重叠，文档保留。
+
+全量测试：387/387（47 文件），build/lint 干净。真实 smoke 用本机 DSH 0.1.1
+（宿主 API 3080），测试会话已 cancel 清理。
 
 ## 6. 与 P0-P3 的关系
 
 - 本方案独立于 Context Isolation（P0-P3），不依赖 summary/guard/metrics；
-- 建议实施顺序：P0-P3 验收后单独评审实施 P4（避免一次改动面过大）。
+- 实施顺序：P0-P3 验收后单独实施 P4（本次即按此执行）。

@@ -141,10 +141,19 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: 'sessions_prompt',
-    description: 'Send a message to a session on its owning node.',
+    description: 'Send a message to a session on its owning node. mode=queue (default) appends to the session queue; mode=steer bypasses the queue and injects immediately into the running turn (structured result: steered/queued/rejected/unavailable).',
     danger: DANGER.DESTRUCTIVE,
     sessionRouted: true,
-    schema: { type: 'object', properties: { session_id: sessionIdProp, message: { type: 'string' }, target_node: targetNodeProp }, required: ['session_id', 'message'] },
+    schema: {
+      type: 'object',
+      properties: {
+        session_id: sessionIdProp,
+        message: { type: 'string' },
+        mode: { type: 'string', enum: ['queue', 'steer'], description: 'queue=normal queued append (default); steer=immediate injection into the running turn' },
+        target_node: targetNodeProp,
+      },
+      required: ['session_id', 'message'],
+    },
   },
   {
     name: 'sessions_wait',

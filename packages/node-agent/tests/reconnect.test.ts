@@ -68,6 +68,7 @@ function buildRig(heartbeatMs = 15_000, leaseMs = 45_000): Rig {
     config: {
       node_id: 'n-agent', hub_url: 'ws://fake/', token: 'tok',
       local_mcp_url: 'http://127.0.0.1:3457/mcp', local_mcp_token: 't',
+      host_api_url: 'http://127.0.0.1:3080',
       display_name: 'a', local_probe_ms: 10_000, reconcile_ms: 10_000,
     },
     backend, wsFactory: () => hubSocket, heartbeatMs, leaseMs, log: () => {},

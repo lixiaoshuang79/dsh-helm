@@ -178,4 +178,22 @@ describe('MCP Context Isolation 端到端（真实 hub + HTTP /mcp 全链路）'
       await e.cleanup()
     }
   })
+
+  it('sessions_prompt mode 透传到节点（queue 默认 / steer 显式）', async () => {
+    const e = await startE2E([{ native_session_id: 'sess-p2', title: 'T', status: 'idle' }])
+    try {
+      e.reconcileSession('sess-p2')
+      // mode=steer 显式透传
+      const steer = await mcpCall(e.port, 'sessions_prompt', { session_id: 'sess-p2', message: '立即停止', mode: 'steer' })
+      expect(steer.result?.isError).toBeFalsy()
+      expect(e.node.lastMcpCall).toMatchObject({ tool: 'sessions_prompt', args: { session_id: 'sess-p2', message: '立即停止', mode: 'steer' } })
+      // 缺省（不带 mode）→ 参数原样透传（agent 按 queue 处理）
+      e.node.lastMcpCall = undefined
+      const plain = await mcpCall(e.port, 'sessions_prompt', { session_id: 'sess-p2', message: 'hello' })
+      expect(plain.result?.isError).toBeFalsy()
+      expect(e.node.lastMcpCall).toMatchObject({ args: { session_id: 'sess-p2', message: 'hello' } })
+    } finally {
+      await e.cleanup()
+    }
+  })
 })

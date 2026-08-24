@@ -118,7 +118,7 @@ ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦
 - **完整历史按需取**：`include_messages=true`（可配 `max_messages` 默认 20、`before_seq` 翻页游标）返回完整消息；旧调用（不带参数）自动走摘要，行为不变。
 - **Response Size Guard**：hub 所有 MCP 响应统一 middleware，`MAX_RESPONSE_BYTES=50000`；超限自动 smart-truncate（保证仍是合法 JSON，挂 `truncated` 元数据），日志 `[mcp-guard] <tool> original=.. returned=.. truncated`。
 - **健康监控**：hub 新增 `GET /metrics`（请求数/平均与最大响应字节/截断与错误计数/活跃连接/perTool 明细）、`GET /readyz`（HA quorum 就绪）、`GET /version`；Dashboard 新增「MCP 控制面」页签展示。
-- **纠错插队设计**（评审稿）：DSH 原生支持 `mode:'steer'` 注入纠偏，转发层当前未透传；方案见 [docs/priority-queue.md](docs/priority-queue.md)，待评审实施。
+- **纠错插队/立即干预**：`sessions_prompt` 支持 `mode=queue|steer`（默认 queue 排队语义不变）；`steer` 绕过队列经 DSH 宿主 API 注入运行中回合（结构化返回 `steered/queued/rejected/unavailable`），DSH 历史事件 `agent/inbox/spliced` 证实注入。设计评审与实施细节见 [docs/priority-queue.md](docs/priority-queue.md)。
 
 ## 平台支持
 

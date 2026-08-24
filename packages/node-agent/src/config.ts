@@ -22,6 +22,9 @@ export interface NodeAgentConfig {
   token: string
   /** Local helm daemon MCP endpoint (loopback only). */
   local_mcp_url: string
+  /** DSH web backend host API base URL (loopback; used for steer injection,
+   *  which the MCP tool surface does not expose). Default http://127.0.0.1:3080. */
+  host_api_url: string
   /** Bearer token for the local daemon (from ~/.agent-chatgpt-helm/token). */
   local_mcp_token: string
   /** Display name (hostname-like); NOT identity. */
@@ -39,12 +42,14 @@ export interface NodeConfigFile {
   token?: string
   local_mcp_url?: string
   local_mcp_token?: string
+  host_api_url?: string
   display_name?: string
   local_probe_ms?: number
   reconcile_ms?: number
 }
 
 const DEFAULT_LOCAL_MCP = 'http://127.0.0.1:3457/mcp'
+const DEFAULT_HOST_API = 'http://127.0.0.1:3080'
 
 export function defaultConfigDir(): string {
   return join(process.env.HOME ?? '.', '.dsh', 'helm')
@@ -73,6 +78,7 @@ export function loadConfig(dir?: string, file?: NodeConfigFile): NodeAgentConfig
     token,
     local_mcp_url: merged.local_mcp_url ?? DEFAULT_LOCAL_MCP,
     local_mcp_token: merged.local_mcp_token ?? '',
+    host_api_url: merged.host_api_url ?? DEFAULT_HOST_API,
     display_name,
     local_probe_ms: merged.local_probe_ms ?? 10_000,
     reconcile_ms: merged.reconcile_ms ?? 60_000,

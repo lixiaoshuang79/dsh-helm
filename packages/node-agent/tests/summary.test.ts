@@ -281,6 +281,7 @@ async function buildAgentRig(backend: LocalHelmBackend): Promise<{ conn: HubConn
       token: 'agent-token',
       local_mcp_url: 'http://127.0.0.1:3457/mcp',
       local_mcp_token: 'local-tok',
+      host_api_url: 'http://127.0.0.1:3080',
       display_name: 'agent-host',
       local_probe_ms: 10_000,
       reconcile_ms: 10_000,

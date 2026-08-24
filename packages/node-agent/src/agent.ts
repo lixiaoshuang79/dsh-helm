@@ -20,6 +20,7 @@ import type { LocalHelmBackend } from './bridge.js'
 import { defaultConfigDir, type NodeAgentConfig } from './config.js'
 import { join } from 'node:path'
 import { SessionSummaryService, type GetSessionParams } from './summary.js'
+import { steerPrompt } from './steer.js'
 
 export interface NodeAgentOptions {
   config: NodeAgentConfig
@@ -430,7 +431,19 @@ export class HelmNodeAgent {
       return res.structuredContent ?? res.content ?? {}
     })
     this.peer.on(NODE_METHODS.PROMPT, async (p) => {
-      const { session_id, message } = p as { session_id: string; message: string }
+      const { session_id, message, mode } = p as { session_id: string; message: string; mode?: string }
+      if (mode === 'steer') {
+        // 立即插队/纠偏：经 DSH 宿主 API 注入运行中回合（MCP 工具层不透传 mode，
+        // 见 steer.ts 协议注释）。返回结构化状态 steered/queued/rejected/unavailable。
+        const result = await steerPrompt({
+          hostApiUrl: this.cfg.host_api_url,
+          sessionId: session_id,
+          message,
+          log: (l) => this.log(l),
+        })
+        if (result.status === 'steered') this.summaries.invalidate(session_id)
+        return result
+      }
       const res = await this.backend.callTool('sessions_prompt', { session_id, message })
       // 新消息落地 → 摘要（last_message_summary 等）过期，立即失效
       if (session_id) this.summaries.invalidate(session_id)
@@ -450,6 +463,19 @@ export class HelmNodeAgent {
       // 必须在这里也走隔离逻辑，否则 P0 摘要不生效（GET_SESSION RPC 仅为直连路径）。
       if (tool === 'sessions_get') {
         return this.summaries.getSession((args ?? {}) as GetSessionParams)
+      }
+      // sessions_prompt 线上同样经 mcp.call 转发（非 PROMPT RPC）：mode=steer 时
+      // 走宿主 API 立即注入（MCP 工具层不透传 mode），返回结构化状态。
+      if (tool === 'sessions_prompt' && (args as { mode?: string } | undefined)?.mode === 'steer') {
+        const { session_id, message } = args as { session_id: string; message: string }
+        const result = await steerPrompt({
+          hostApiUrl: this.cfg.host_api_url,
+          sessionId: session_id,
+          message,
+          log: (l) => this.log(l),
+        })
+        if (result.status === 'steered') this.summaries.invalidate(session_id)
+        return result
       }
       const res = await this.backend.callTool(tool, args ?? {})
       // Surface structured content to the hub (fall back to content blocks).
