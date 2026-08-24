@@ -10,7 +10,7 @@
 export const NODE_PROTOCOL_VERSION = 1 as const
 
 /** Store schema version (SQLite migrations). */
-export const STORE_SCHEMA_VERSION = 1 as const
+export const STORE_SCHEMA_VERSION = 2 as const
 
 /** Default heartbeat interval for node agents (ms). */
 export const DEFAULT_HEARTBEAT_MS = 15_000
@@ -51,6 +51,22 @@ export const DEFAULT_HUB_MCP_PORT = 3471
 /** Node token length in bytes (random secret). */
 export const NODE_TOKEN_BYTES = 32
 
+/**
+ * Node_id prefix that marks an *unauthenticated enrollment* connection.
+ * A client that wants to join the mesh without a token connects with
+ * node_id = `enroll:<uuid>`; the hub skips the HMAC challenge for these
+ * connections and allows exactly one RPC: enrollment.consume (then closes).
+ * Real node ids are UUIDs and can never collide with this prefix.
+ */
+export const ENROLL_NODE_ID_PREFIX = 'enroll:' as const
+
+/**
+ * Enrollment pairing code shape: `dshp-` + 20 base36 chars (~104 bits).
+ * The plaintext code is shown exactly once (create response); the hub only
+ * ever stores sha256(code).
+ */
+export const PAIRING_CODE_PATTERN = /^dshp-[0-9a-z]{20}$/
+
 /** HMAC algorithm for challenge handshake. */
 export const HMAC_ALGORITHM = 'sha256' as const
 
@@ -90,4 +106,52 @@ export const DANGER = {
   WRITE: 'write',
   /** Destructive / side-effecting: requires explicit or presence-backed target. */
   DESTRUCTIVE: 'destructive',
+} as const
+
+/**
+ * Control-plane HA: node_id prefix a hub uses when authenticating to a peer
+ * hub over the node mesh. The peer is treated as a "special node" whose
+ * identity is `cp:<cp_id>`; the server side looks its token up with the same
+ * token table (DSH_HELM_TOKEN / registration_tokens accept
+ * `cp:<cp_id>=<token>` entries).
+ */
+export const CP_NODE_PREFIX = 'cp:' as const
+
+/** RPC methods between control-plane peers (hub <-> hub over the node mesh). */
+export const CP_METHODS = {
+  /** Full registry + leader state exchange on peer connect (request/response). */
+  SYNC: 'cp.sync',
+  /** Periodic heartbeat carrying leader state + registry diff. */
+  HEARTBEAT: 'cp.heartbeat',
+  /** Leader election proposal (term + leader + candidate set); ack/refuse. */
+  ELECT: 'cp.elect',
+  /** Write-lease renew from the lease-holding leader (2/2 quorum). */
+  LEASE_RENEW: 'cp.lease.renew',
+} as const
+
+/** Default CP peer heartbeat interval (ms). */
+export const DEFAULT_CP_HEARTBEAT_MS = 5_000
+
+/**
+ * Write-lease renew interval (ms): the elected leader renews its write lease
+ * to the peer (2/2 quorum). Each successful renew refreshes the lease.
+ */
+export const DEFAULT_CP_LEASE_RENEW_MS = 10_000
+
+/**
+ * Write-lease TTL (ms): after this long without a peer renew/heartbeat the
+ * cluster has no quorum — the leader demotes to read-only and all WRITE_TOOLS
+ * are refused with QUORUM_LOST. Followers stay read-only and NEVER promote on
+ * their own (no split-brain double-write).
+ */
+export const DEFAULT_CP_LEASE_TTL_MS = 45_000
+
+/** Default CP election priority (smallest wins; tie -> smaller cp_id). */
+export const DEFAULT_CP_PRIORITY = 0
+
+/** Store kv keys for the persisted CP term/leader (fencing state). */
+export const CP_TERM_KV = {
+  TERM: 'cp_term',
+  LEADER: 'cp_leader',
+  LEADER_TERM: 'cp_leader_term',
 } as const

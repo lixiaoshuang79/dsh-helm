@@ -13,11 +13,26 @@
  * tests can run it over in-memory pipes while production runs it over ws/wss.
  */
 
-import type { NodeInfo, NodeStatus, SessionInfo, WorkspaceInfo, PresenceClaim, AuditEntry } from '@dsh-helm/protocol'
-import { HUB_METHODS, NODE_METHODS, PROTOCOL_ERROR } from '@dsh-helm/protocol'
+import type { NodeInfo, NodeStatus, SessionInfo, WorkspaceInfo, PresenceClaim, AuditEntry, CpRole } from '@dsh-helm/protocol'
+import { CP_NODE_PREFIX, HUB_METHODS, NODE_METHODS, PROTOCOL_ERROR } from '@dsh-helm/protocol'
 import type { DshHelmStore, NodeRegistry, StoredNode, SessionCatalog, WorkspaceCatalog, PresenceRegistry, AuditLog } from '@dsh-helm/store'
 import { Router, type RouteResult } from './router.js'
 import { HealthAggregator } from './health.js'
+import type { PairingConsumeResult } from './pairing.js'
+
+/** Minimal pairing surface the control plane exposes to RPC connections. */
+export interface PairingConsumer {
+  consume(params: unknown, peerId: string): Promise<PairingConsumeResult>
+}
+
+/**
+ * HA overlay hook (implemented by HubHa): merges peer-derived nodes into the
+ * local catalog and answers role queries for write-forwarding decisions.
+ */
+export interface HaAware {
+  mergedCatalog(rows: Array<{ node: StoredNode; connection: boolean }>): Array<{ node: StoredNode; connection: boolean; derived?: boolean }>
+  role(): CpRole
+}
 
 export interface ControlPlaneOptions {
   store: DshHelmStore
@@ -34,6 +49,10 @@ export interface ControlPlaneOptions {
   tokenLookup(nodeId: string): string | undefined
   /** In-memory map of live connections by node_id. */
   connections: Map<string, NodeConnection>
+  /** Optional device enrollment (pairing) service. */
+  pairing?: PairingConsumer
+  /** Optional hook when a control-plane peer (`cp:<cp_id>`) authenticates. */
+  onPeerAuthenticated?: (cpId: string, conn: NodeConnection) => void
   /** Optional persisted audit/route log (no bodies, no secrets). */
   audit?: AuditLog
   log?: (line: string) => void
@@ -76,6 +95,10 @@ export class ControlPlane {
   readonly connections: Map<string, NodeConnection>
   readonly heartbeatMs: number
   readonly leaseMs: number
+  /** Device enrollment (pairing) surface for RPC connections. */
+  pairing?: PairingConsumer
+  /** HA overlay (HubHa): merged catalog + role queries. */
+  private ha?: HaAware
 
   constructor(private opts: ControlPlaneOptions) {
     this.router = new Router({
@@ -90,6 +113,7 @@ export class ControlPlane {
     this.connections = opts.connections
     this.heartbeatMs = opts.heartbeatMs
     this.leaseMs = opts.leaseMs
+    this.pairing = opts.pairing
   }
 
   get hubId(): string {
@@ -131,8 +155,19 @@ export class ControlPlane {
     return this.opts.tokenLookup(nodeId)
   }
 
-  /** Node authenticated: register connection, refresh registry. */
+  /** Attach the HA overlay (HubHa). Must be called before nodeCatalog is read. */
+  attachHa(ha?: HaAware): void {
+    this.ha = ha
+  }
+
+  /** Node authenticated: register connection, refresh registry. Control-plane
+   *  peer connections (`cp:<cp_id>`) are routed to the HA peer hook instead of
+   *  the node routing table (never forward node RPCs to a peer hub). */
   onNodeAuthenticated(nodeId: string, conn: NodeConnection): void {
+    if (nodeId.startsWith(CP_NODE_PREFIX)) {
+      this.opts.onPeerAuthenticated?.(nodeId.slice(CP_NODE_PREFIX.length), conn)
+      return
+    }
     this.opts.connections.set(nodeId, conn)
     this.log(`node authenticated: ${nodeId}`)
   }
@@ -180,6 +215,17 @@ export class ControlPlane {
     if (!claim || !claim.node_id) throw rpcError(PROTOCOL_ERROR.INVALID_REQUEST, 'presence report requires claim')
     this.opts.presence.claim(claim)
     return { ok: true }
+  }
+
+  /**
+   * Handle enrollment.consume (authenticated RPC surface). Rate limiting is
+   * keyed by the authenticated node_id; unauthenticated enroll connections
+   * go through the enroll-only peer in HubConnection with their enroll id.
+   */
+  consumeEnrollment(params: unknown, peerId: string): Promise<PairingConsumeResult> {
+    const pairing = this.pairing
+    if (!pairing) throw rpcError(PROTOCOL_ERROR.METHOD_NOT_FOUND, 'enrollment is not enabled on this hub')
+    return pairing.consume(params, peerId)
   }
 
   /** Forward an operation to the routed node (or reject). */
@@ -239,9 +285,12 @@ export class ControlPlane {
     return this.health.aggregate(true)
   }
 
-  /** Live node map for route_explain / nodes_list. */
-  nodeCatalog(): Array<{ node: StoredNode; connection: boolean }> {
-    return this.opts.nodes.list().map((n) => ({ node: n, connection: this.opts.connections.has(n.node_id) }))
+  /** Live node map for route_explain / nodes_list. Merges HA overlay entries
+   *  when dual-CP sync is active (peers' nodes appear here too, `derived` marks
+   *  nodes whose connected flag came from the peer side). */
+  nodeCatalog(): Array<{ node: StoredNode; connection: boolean; derived?: boolean }> {
+    const rows = this.opts.nodes.list().map((n) => ({ node: n, connection: this.opts.connections.has(n.node_id) }))
+    return this.ha ? this.ha.mergedCatalog(rows) : rows
   }
 
   private auditRoute(callId: string, op: string, route: RouteResult, danger: string): void {
@@ -291,5 +340,6 @@ export function hubRpcHandlers(cp: ControlPlane, nodeId: string) {
     [HUB_METHODS.NODE_RELEASE]: () => cp.handleRelease(nodeId),
     [HUB_METHODS.CATALOG_RECONCILE]: (p: unknown) => cp.handleReconcile(p as ReconcilePayload),
     [HUB_METHODS.PRESENCE_REPORT]: (p: unknown) => cp.handlePresenceReport(p as PresencePayload),
+    [HUB_METHODS.ENROLLMENT_CONSUME]: (p: unknown) => cp.consumeEnrollment(p, nodeId),
   }
 }

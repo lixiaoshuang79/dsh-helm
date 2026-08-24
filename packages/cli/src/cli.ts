@@ -28,6 +28,8 @@ import { spawnSync } from 'node:child_process'
 import { runDoctor } from './doctor.js'
 import { runDashboard } from './dashboard.js'
 import { runInstall } from './install.js'
+import { runHaProxy } from './ha-proxy-cli.js'
+import { runJoin, runPair } from './pair.js'
 
 export type CliCommand =
   | 'init'
@@ -37,6 +39,7 @@ export type CliCommand =
   | 'doctor'
   | 'dashboard'
   | 'install'
+  | 'ha-proxy'
   | 'nodes'
   | 'node'
   | 'route-explain'
@@ -45,6 +48,8 @@ export type CliCommand =
   | 'rotate-token'
   | 'handoff'
   | 'verify'
+  | 'pair'
+  | 'join'
   | 'help'
 
 export interface CliArgs {
@@ -88,7 +93,7 @@ export function parseArgs(argv: string[]): CliArgs {
 }
 
 function isCommand(c: string): c is CliCommand {
-  return ['init', 'agent', 'hub', 'status', 'doctor', 'dashboard', 'install', 'nodes', 'node', 'route-explain', 'presence', 'target', 'rotate-token', 'handoff', 'verify', 'help'].includes(c)
+  return ['init', 'agent', 'hub', 'status', 'doctor', 'dashboard', 'install', 'ha-proxy', 'nodes', 'node', 'route-explain', 'presence', 'target', 'rotate-token', 'handoff', 'verify', 'pair', 'join', 'help'].includes(c)
 }
 
 export const HELP_TEXT = `dsh-helm — DSH ChatGPT Helm multi-node control plane
@@ -113,6 +118,9 @@ Commands:
   target <node>            Set explicit target node for this CLI session
   rotate-token             Generate a new node token
   handoff <session> <to>   Request session handoff (v1: unsupported)
+  pair                     Generate a device pairing code (hub host)
+  join --control-plane WS --code CODE
+                           Enroll this machine as a new node (writes node.json)
   verify                   Self-check config + local daemon reachability
   help                     This help
 `
@@ -192,6 +200,28 @@ export async function main(argv: string[]): Promise<number> {
       return Number(process.exitCode ?? 0)
     case 'install':
       return runInstall(parsed.args, { hubUrl: flagString(parsed.flags['hub']) })
+    case 'ha-proxy': {
+      // parseArgs already consumed --flag values into `flags`; reconstruct a
+      // flat argv for runHaProxy's own parser.
+      const flat: string[] = [...parsed.args]
+      for (const [k, v] of Object.entries(parsed.flags)) {
+        if (typeof v === 'string') flat.push(`--${k}`, v)
+        else if (v === true) flat.push(`--${k}`)
+      }
+      await runHaProxy(flat)
+      return Number(process.exitCode ?? 0)
+    }
+    case 'pair':
+      return runPair({ hubUrl: flagString(parsed.flags['hub']), json: parsed.flags['json'] === true })
+    case 'join': {
+      const controlPlane = flagString(parsed.flags['control-plane'])
+      const code = flagString(parsed.flags['code'])
+      if (!controlPlane || !code) {
+        console.error('usage: dsh-helm join --control-plane <ws://ip:3470> --code <code>')
+        return 1
+      }
+      return runJoin({ controlPlane, code, force: parsed.flags['force'] === true })
+    }
     case 'handoff': {
       const [sessionId, toNode] = parsed.args
       if (!sessionId || !toNode) {

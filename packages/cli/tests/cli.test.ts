@@ -70,7 +70,7 @@ describe('handoff v1', () => {
 
 describe('help', () => {
   it('documents all commands', () => {
-    for (const cmd of ['init', 'agent', 'hub', 'status', 'doctor', 'dashboard', 'install', 'nodes', 'route-explain', 'presence', 'rotate-token', 'handoff', 'verify']) {
+    for (const cmd of ['init', 'agent', 'hub', 'status', 'doctor', 'dashboard', 'install', 'nodes', 'route-explain', 'presence', 'rotate-token', 'handoff', 'verify', 'pair', 'join']) {
       expect(HELP_TEXT).toContain(cmd)
     }
   })

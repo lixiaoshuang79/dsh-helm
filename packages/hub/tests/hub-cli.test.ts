@@ -66,4 +66,44 @@ describe('hub-cli', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  it('serves loopback pairing endpoints /pair/new and /pair/list', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-helm-hubcli-pair-'))
+    const storeFile = join(dir, 'store.sqlite3')
+    const opts = parseHubArgs(['--mesh-port', '0', '--mcp-port', '0', '--store', storeFile])
+    const hub = startHub(opts, () => {})
+    try {
+      // wait for the MCP http listener (listen is async in startHub)
+      let mcpAddr: { port: number } | null = null
+      for (let i = 0; i < 20 && !mcpAddr; i++) {
+        await new Promise((r) => setTimeout(r, 25))
+        mcpAddr = hub.mcpHttp.address()
+      }
+      const port = mcpAddr?.port ?? 0
+      expect(port).toBeGreaterThan(0)
+
+      const created = await fetch(`http://127.0.0.1:${port}/pair/new`)
+      expect(created.status).toBe(200)
+      const pair = (await created.json()) as { code: string; expiresAt: string }
+      expect(pair.code).toMatch(/^dshp-[0-9a-z]{20}$/)
+      expect(Date.parse(pair.expiresAt)).toBeGreaterThan(Date.now())
+
+      // the store must not hold the plaintext code
+      const rows = hub.store.db.prepare(`SELECT code_hash FROM enrollment_codes`).all() as Array<{ code_hash: string }>
+      expect(JSON.stringify(rows)).not.toContain(pair.code)
+
+      const listed = await fetch(`http://127.0.0.1:${port}/pair/list`)
+      expect(listed.status).toBe(200)
+      const list = (await listed.json()) as { codes: Array<{ codeHashPrefix: string; status: string }> }
+      expect(list.codes).toHaveLength(1)
+      expect(list.codes[0]!.codeHashPrefix).toHaveLength(8)
+      expect(JSON.stringify(list)).not.toContain(pair.code)
+    } finally {
+      await hub.mesh.close()
+      hub.mcpHttp.close()
+      hub.cp.stop()
+      hub.store.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })

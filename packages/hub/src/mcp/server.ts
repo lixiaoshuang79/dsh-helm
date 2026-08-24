@@ -18,11 +18,31 @@
 import type { PresenceClaim, RouteDecision } from '@dsh-helm/protocol'
 import { DANGER, ROUTE_OUTCOME } from '@dsh-helm/protocol'
 import { ControlPlane } from '../control-plane.js'
-import { TOOL_BY_NAME, type ToolDef } from './tools.js'
+import { TOOL_BY_NAME, WRITE_TOOLS, type ToolDef } from './tools.js'
 
 export interface HubMcpServerOptions {
   cp: ControlPlane
+  /** HA write forwarder (HubHa). When present and the hub is a follower,
+   *  every WRITE_TOOLS call is forwarded to the leader instead of executing
+   *  locally (single-writer fencing). */
+  ha?: WriteForwarder
   log?: (line: string) => void
+}
+
+/** Minimal HA surface the MCP server needs (implemented by HubHa). */
+export interface WriteForwarder {
+  /**
+   * 'readwrite' = this hub may execute writes locally (standalone, or the
+   * lease-holding leader). 'readonly' = this hub must not (follower,
+   * nominating, or quorum lost).
+   */
+  writeMode(): 'readwrite' | 'readonly'
+  /**
+   * Execute a WRITE_TOOLS call on this hub. Called only when writeMode() is
+   * 'readonly': follower+quorum forwards to the leader; otherwise returns
+   * the structured QUORUM_LOST error. Never throws.
+   */
+  handleWrite(name: string, args: Record<string, unknown>): Promise<McpCallResult>
 }
 
 export interface McpToolCall {
@@ -37,10 +57,12 @@ export interface McpCallResult {
 
 export class HubMcpServer {
   private cp: ControlPlane
+  private ha?: WriteForwarder
   private logFn?: (line: string) => void
 
   constructor(opts: HubMcpServerOptions) {
     this.cp = opts.cp
+    this.ha = opts.ha
     this.logFn = opts.log
   }
 
@@ -68,6 +90,14 @@ export class HubMcpServer {
     try {
       if (def.discovery) {
         return this.handleDiscovery(def, args, callId)
+      }
+      // Single-writer fencing via 2/2-quorum write lease: while this hub is
+      // NOT the leased leader (writeMode 'readonly'), every mutating tool is
+      // either forwarded to the leader (follower+quorum) or refused with the
+      // structured QUORUM_LOST error.
+      if (this.ha && WRITE_TOOLS.has(def.name) && this.ha.writeMode() === 'readonly') {
+        this.log(`[ha] write ${def.name} via HA path (writeMode=readonly)`)
+        return await this.ha.handleWrite(def.name, args)
       }
       return await this.handleRouted(def, args, callId)
     } catch (err) {
@@ -138,7 +168,7 @@ export class HubMcpServer {
         })
       }
       case 'nodes_list': {
-        const rows = this.cp.nodeCatalog().map(({ node, connection }) => ({
+        const rows = this.cp.nodeCatalog().map(({ node, connection, derived }) => ({
           node_id: node.node_id,
           display_name: node.display_name,
           platform: node.platform,
@@ -147,6 +177,9 @@ export class HubMcpServer {
           status: node.status,
           connected: connection,
           last_seen: node.last_seen,
+          // dual-CP: true when this CP learned the node via its peer (the
+          // direct CP's report is authoritative for `connected`)
+          ...(derived ? { derived: true } : {}),
         }))
         return this.text({ nodes: rows })
       }

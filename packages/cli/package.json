@@ -21,6 +21,7 @@
   "dependencies": {
     "@dsh-helm/dashboard": "workspace:*",
     "@dsh-helm/node-agent": "workspace:*",
-    "@dsh-helm/platform": "workspace:*"
+    "@dsh-helm/platform": "workspace:*",
+    "@dsh-helm/protocol": "workspace:*"
   }
 }

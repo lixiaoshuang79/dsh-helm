@@ -61,6 +61,10 @@ export class HelmNodeAgent {
   private reconnectTimer?: NodeJS.Timeout
   private stopped = false
   private backoff = RECONNECT_BACKOFF_BASE_MS
+  /** Index of the control-plane endpoint currently being dialed. Advances one
+   *  step per reconnect (round-robin over [hub_url, ...fallback_urls]) and
+   *  sticks to the endpoint that last connected until it drops. */
+  private endpointIndex = 0
   private seq = 0
   private health: HealthReport = {
     channel: { status: 'unknown' },
@@ -119,6 +123,24 @@ export class HelmNodeAgent {
     this.logFn?.(line)
   }
 
+  /** Control-plane endpoints in dial order: [hub_url, ...fallback_urls]. */
+  private endpoints(): string[] {
+    return [this.cfg.hub_url, ...(this.cfg.fallback_urls ?? [])].filter((u) => u !== '')
+  }
+
+  /** Current endpoint (round-robin; fixed after a successful connect). */
+  private currentEndpoint(): string {
+    const eps = this.endpoints()
+    if (eps.length === 0) return ''
+    return eps[this.endpointIndex % eps.length]!
+  }
+
+  /** Advance to the next endpoint; wraps around the list. */
+  private advanceEndpoint(): void {
+    const eps = this.endpoints()
+    if (eps.length > 1) this.endpointIndex = (this.endpointIndex + 1) % eps.length
+  }
+
   private async connect(): Promise<void> {
     if (this.stopped) return
     this.state = 'connecting'
@@ -131,9 +153,16 @@ export class HelmNodeAgent {
         .then(() => this.log('local helm connected'))
         .catch((err) => this.log(`local helm connect failed: ${err instanceof Error ? err.message : err} (datapath degraded)`))
     }
+    const url = this.currentEndpoint()
+    if (url === '') {
+      this.log('no control plane endpoint configured (hub_url empty)')
+      this.scheduleReconnect('no-endpoint')
+      return
+    }
+    this.log(`connecting to control plane ${url}`)
     let ws: WebSocketLike
     try {
-      ws = this.wsFactory(this.cfg.hub_url)
+      ws = this.wsFactory(url)
     } catch (err) {
       this.log(`ws factory failed: ${err instanceof Error ? err.message : err}`)
       this.scheduleReconnect('ws-factory-failed')
@@ -181,13 +210,24 @@ export class HelmNodeAgent {
       }
     }
     ws.onclose = () => {
-      if (!this.stopped && this.state === 'connected') {
+      // Reconnect on unexpected close AND on connections that never opened
+      // (e.g. an endpoint that is down — refusal surfaces as error+close
+      // while still 'connecting').
+      if (!this.stopped && (this.state === 'connected' || this.state === 'connecting')) {
         this.log('socket closed unexpectedly')
         this.scheduleReconnect('socket-close')
       }
     }
     ws.onerror = (err) => {
       this.log(`ws error: ${err instanceof Error ? err.message : String(err)}`)
+      // Some ws implementations do not guarantee a close event after a
+      // failed connection attempt (refused/reset while still 'connecting');
+      // without this the agent would hang forever. scheduleReconnect is
+      // idempotent (no-op while a timer is pending), and a later onclose
+      // would just hit the same guard.
+      if (!this.stopped && (this.state === 'connecting' || this.state === 'connected')) {
+        this.scheduleReconnect('socket-error')
+      }
     }
   }
 
@@ -460,6 +500,9 @@ export class HelmNodeAgent {
   private scheduleReconnect(reason: string): void {
     if (this.stopped) return
     if (this.reconnectTimer) return
+    // Try the next control-plane endpoint on every reconnect (round-robin
+    // over [hub_url, ...fallback_urls]); a successful connect pins the index.
+    this.advanceEndpoint()
     const delay = this.backoff + Math.random() * 500
     this.backoff = Math.min(this.backoff * 2, RECONNECT_BACKOFF_MAX_MS)
     this.state = 'reconnecting'

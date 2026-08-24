@@ -12,7 +12,7 @@ import type { Server } from 'node:http'
 import { ControlPlane } from './control-plane.js'
 import { HubConnection } from './connection.js'
 import type { WireMessage } from '@dsh-helm/protocol'
-import { DEFAULT_HUB_MESH_PORT } from '@dsh-helm/protocol'
+import { DEFAULT_HUB_MESH_PORT, type RpcPeer } from '@dsh-helm/protocol'
 
 export interface MeshServerOptions {
   cp: ControlPlane
@@ -23,16 +23,23 @@ export interface MeshServerOptions {
   server?: Server
   /** Path prefix to filter (default '/'). */
   path?: string
+  /** Optional extra RPC handlers registered after the hub handlers on each
+   *  authenticated connection (used for the HA `cp.*` peer surface). */
+  rpcExtras?: (peer: RpcPeer, nodeId: string) => void
+  /** Optional callback when a connection fully closes (nodeId when it had authenticated). */
+  connectionClosed?: (nodeId?: string) => void
   log?: (line: string) => void
 }
 
 export class MeshServer {
+  private opts: MeshServerOptions
   private wss: WebSocketServer
   private logFn?: (line: string) => void
   private cp: ControlPlane
   readonly port: number
 
   constructor(opts: MeshServerOptions) {
+    this.opts = opts
     this.logFn = opts.log
     this.cp = opts.cp
     this.port = opts.port ?? DEFAULT_HUB_MESH_PORT
@@ -54,8 +61,10 @@ export class MeshServer {
       send: (msg) => {
         if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(msg))
       },
+      rpcExtras: this.opts.rpcExtras,
       onClose: (nodeId) => {
         if (nodeId) this.logFn?.(`node disconnected: ${nodeId}`)
+        this.opts.connectionClosed?.(nodeId)
       },
     })
     socket.on('message', (data) => {

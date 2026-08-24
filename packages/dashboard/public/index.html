@@ -78,6 +78,12 @@
     border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px;
     max-height: 96px; overflow: auto; white-space: pre-wrap; word-break: break-all; margin-top: 4px;
   }
+  .pair-actions { display: flex; align-items: center; gap: 10px; margin: 8px 0 4px; }
+  .pair-code { font-family: var(--mono); font-size: 20px; letter-spacing: 2px; color: var(--accent); word-break: break-all; }
+  .pair-expiry { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-left: 8px; }
+  .pair-countdown { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .pair-note { color: var(--muted); font-size: 11px; margin: 6px 0 10px; }
+  .panel h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin: 12px 0 6px; }
   footer { margin-top: 22px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
 </style>
 </head>
@@ -94,6 +100,25 @@
 <div class="banner" id="banner"></div>
 
 <section class="cards" id="overview"></section>
+
+<section class="panel">
+  <h2>新增 DSH 设备</h2>
+  <div class="kv">
+    <span class="k">配对码</span>
+    <span class="v"><span class="pair-code" id="pair-code">—</span><span class="pair-expiry" id="pair-expiry"></span></span>
+  </div>
+  <div class="pair-actions">
+    <button id="pair-btn" type="button">生成配对码</button>
+    <span class="pair-countdown" id="pair-countdown"></span>
+  </div>
+  <div class="kv" id="pair-tip-row" style="display:none">
+    <span class="k">在新设备上运行</span>
+    <span class="v"><code id="pair-tip"></code></span>
+  </div>
+  <p class="pair-note" id="pair-note">配对码仅用于换取新节点的长期 token，一次性有效（默认 10 分钟），明文只显示这一次。</p>
+  <h3>最近配对</h3>
+  <div id="pair-table"></div>
+</section>
 
 <section class="panel">
   <h2>节点</h2>
@@ -126,6 +151,8 @@
 
 const REFRESH_MS = 5000;
 const $ = (id) => document.getElementById(id);
+// Replaced at serve time by the dashboard server with the runtime token.
+const DASHBOARD_TOKEN = '__DSH_DASHBOARD_TOKEN__';
 
 function el(tag, cls, text) {
   const e = document.createElement(tag);
@@ -226,6 +253,7 @@ function renderOverview(s) {
       kvRow('节点数', mono(String(s.hub.nodeCount ?? 0))),
       ...hubErr,
     ]),
+    card('控制面 HA', renderHaRows(s.ha)),
     card('Tunnel', [
       kvRow('状态', tunnels.running ? badge('运行中', 'ok') : badge('未运行', 'bad')),
       kvRow('就绪', tunnels.ready ? badge('ready', 'ok') : badge('未就绪', 'bad')),
@@ -250,6 +278,35 @@ function renderOverview(s) {
       kvRow('Hub URL', mono(s.role.hubUrl || '—')),
     ]),
   );
+}
+
+function renderHaRows(ha) {
+  const h = ha || {};
+  if (h.error) return [kvRow('错误', el('span', 'err', h.error))];
+  const phaseText = {
+    standalone: '单机',
+    'leader-leased': 'leader（租约持有）',
+    nominating: '选举中',
+    'read-only-no-quorum': '只读（无 quorum）',
+    follower: 'follower',
+  }[h.phase] || (h.phase || '—');
+  const roleText = {
+    standalone: badge('standalone', 'mute'),
+    leader: badge('leader', 'ok'),
+    follower: badge('follower', 'mute'),
+  }[h.role] || mono(h.role || '—');
+  const rows = [
+    kvRow('角色', roleText),
+    kvRow('阶段', mono(phaseText)),
+    kvRow('写入', h.writeMode === 'readwrite' ? badge('readwrite', 'ok') : badge('readonly', h.writeMode === 'readonly' ? 'bad' : 'mute')),
+    kvRow('Quorum', h.quorum === true ? badge('2/2 quorum', 'ok') : (h.quorum === false ? badge('无 quorum', 'bad') : mono('—'))),
+    kvRow('Term', mono(String(h.term ?? '—'))),
+    kvRow('Leader', h.leaderId ? el('span', 'mono', abbrevId(h.leaderId)) : mono('—')),
+    kvRow('Peer 数', mono(String((h.peers || []).length))),
+    kvRow('复制同步', h.syncOk === true ? badge('同步', 'ok') : (h.syncOk === false ? badge('未同步', 'bad') : mono('—'))),
+    kvRow('故障切换', mono(String(h.failoverCount ?? 0))),
+  ];
+  return rows;
 }
 
 function renderNodes(s) {
@@ -395,6 +452,102 @@ function render(s) {
   $('generated-at').textContent = gen ? `generatedAt ${gen}` : '';
 }
 
+// ---- device pairing ----
+
+function pairFetch(url, init) {
+  const headers = Object.assign({ 'x-dashboard-token': DASHBOARD_TOKEN }, init && init.headers ? init.headers : {});
+  return fetch(url, Object.assign({}, init, { headers }));
+}
+
+let pairTimer = null;
+function stopPairCountdown() {
+  if (pairTimer !== null) clearInterval(pairTimer);
+  pairTimer = null;
+}
+
+function pairCountdown(expiresAt) {
+  stopPairCountdown();
+  const tick = () => {
+    const left = Date.parse(expiresAt) - Date.now();
+    if (!(left > 0)) {
+      $('pair-countdown').textContent = '已过期';
+      stopPairCountdown();
+      return;
+    }
+    const m = Math.floor(left / 60000);
+    const s = Math.floor((left % 60000) / 1000);
+    $('pair-countdown').textContent = `剩余 ${m}:${String(s).padStart(2, '0')}`;
+  };
+  tick();
+  pairTimer = setInterval(tick, 1000);
+}
+
+function pairStatusBadge(status) {
+  if (status === 'consumed') return badge('已使用', 'ok');
+  if (status === 'locked') return badge('已锁定', 'bad');
+  return badge('待使用', 'warn');
+}
+
+function renderPairCodes(codes) {
+  const wrap = $('pair-table');
+  wrap.textContent = '';
+  if (!Array.isArray(codes) || codes.length === 0) {
+    wrap.append(el('p', 'empty', '暂无配对记录'));
+    return;
+  }
+  const table = el('table', 'data-table');
+  const head = el('tr');
+  for (const h of ['代码', '状态', '创建', '过期', '使用时间']) head.append(el('th', null, h));
+  table.append(head);
+  for (const c of codes) {
+    const tr = el('tr');
+    tr.append(el('td', 'mono', `${c.codeHashPrefix || ''}…`));
+    const st = el('td');
+    st.append(pairStatusBadge(c.status));
+    tr.append(st);
+    tr.append(el('td', 'mono', relTime(c.createdAt)));
+    tr.append(el('td', 'mono', relTime(c.expiresAt)));
+    tr.append(el('td', 'mono', relTime(c.consumedAt)));
+    table.append(tr);
+  }
+  wrap.append(table);
+}
+
+async function generatePair() {
+  const btn = $('pair-btn');
+  btn.disabled = true;
+  try {
+    const res = await pairFetch('/api/pair', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    if (!res.ok) throw new Error(`/api/pair http ${res.status}`);
+    const data = await res.json();
+    $('pair-code').textContent = data.code;
+    $('pair-expiry').textContent = data.expiresAt ? `有效至 ${new Date(data.expiresAt).toLocaleTimeString('zh-CN', { hour12: false })}` : '';
+    $('pair-tip').textContent = data.tip || '';
+    $('pair-tip-row').style.display = data.tip ? '' : 'none';
+    $('pair-note').textContent = '配对码明文只显示这一次，请立即复制到目标设备；10 分钟内有效。';
+    if (data.expiresAt) pairCountdown(data.expiresAt);
+    hideBanner();
+    await loadPairCodes();
+  } catch (err) {
+    showBanner(`生成配对码失败：${err.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function loadPairCodes() {
+  try {
+    const res = await pairFetch('/api/pair/status');
+    if (!res.ok) throw new Error(`/api/pair/status http ${res.status}`);
+    const data = await res.json();
+    renderPairCodes(data.codes);
+  } catch (err) {
+    const wrap = $('pair-table');
+    wrap.textContent = '';
+    wrap.append(el('p', 'err', `配对状态拉取失败：${err.message}`));
+  }
+}
+
 function showBanner(msg) {
   const b = $('banner');
   b.textContent = msg;
@@ -423,6 +576,7 @@ async function load() {
   } finally {
     btn.disabled = false;
   }
+  loadPairCodes();
 }
 
 let timer = null;
@@ -443,6 +597,7 @@ $('auto-refresh').addEventListener('change', (e) => {
   else stopAutoRefresh();
 });
 $('refresh-btn').addEventListener('click', load);
+$('pair-btn').addEventListener('click', generatePair);
 
 startAutoRefresh();
 load();

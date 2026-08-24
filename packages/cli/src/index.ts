@@ -5,3 +5,5 @@ export type { DoctorOptions, DoctorSection, DoctorLine, SectionStatus, LocalNode
 export { runDashboard, DEFAULT_DASHBOARD_PORT, DEFAULT_DASHBOARD_HOST } from './dashboard.js'
 export { runInstall } from './install.js'
 export type { InstallOptions } from './install.js'
+export { runPair, runJoin, enrollClient, DEFAULT_PAIR_HUB_URL, DEFAULT_JOIN_TIMEOUT_MS } from './pair.js'
+export type { PairRunOptions, JoinRunOptions, TailscaleProbeResult, EnrollResult } from './pair.js'

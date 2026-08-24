@@ -5,14 +5,41 @@
  * Usage:
  *   dsh-helm-hub --mesh-port 3470 --mcp-port 3471 --store ~/.dsh/helm/store.sqlite3
  *
- * Token lookup is delegated to the DSH_HELM_TOKEN environment variable:
- * `node_id=token` comma-separated (production would use a secrets manager).
+ * Token lookup: DSH_HELM_TOKEN (`node_id=token` comma-separated) merged with
+ * the persisted registration_tokens table (populated by device enrollment) —
+ * freshly paired nodes authenticate without touching hub env vars.
  * Loopback only by default; set DSH_HELM_BIND=0.0.0.0 for WSS behind a proxy.
+ *
+ * Control-plane HA (dual CP, 2/2-quorum write lease):
+ *   --cp-peer <ws-url>      dial this peer hub (repeatable; e.g. ws://host:3470)
+ *   --cp-id <id>            this CP's identity (default: --default-node, else
+ *                           ~/.dsh/helm/node.json node_id, else --hub-id)
+ *   --cp-token <token>      token used when authenticating to peers (server
+ *                           side looks up `cp:<cp_id>` in the same token table)
+ *   --cp-token-env <ENV>    read the CP token from this environment variable
+ *   --cp-priority <n>       election priority (smallest wins; default 0)
+ *   --cp-failover-ms <ms>   write-lease TTL: after this long without peer
+ *                           acks the hub demotes to read-only and refuses
+ *                           writes (QUORUM_LOST). Default 45s. Followers
+ *                           NEVER self-promote (no split-brain writes).
+ *   --cp-lease-renew-ms <ms>
+ *                           write-lease renew interval (must stay below the
+ *                           TTL). Default 10s.
+ *
+ * Loopback pairing endpoints on the MCP HTTP server:
+ *   GET /pair/new  -> { code, expiresAt }   (create a one-time pairing code)
+ *   GET /pair/list -> { codes: [...] }      (recent codes, hash prefix only)
+ * Both return 403 unless the MCP server binds a loopback address.
+ *
+ * HA status endpoint (loopback):
+ *   GET /cp-status -> { cpId, role, term, leaderId, peers, syncOk, ... }
  */
 
 import { createServer } from 'node:http'
-import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceRegistry } from '@dsh-helm/store'
-import { ControlPlane, HubConnection, MeshServer, HubMcpServer } from '@dsh-helm/hub'
+import { readFileSync } from 'node:fs'
+import { DshHelmStore, NodeRegistry, SessionCatalog, WorkspaceCatalog, PresenceRegistry, RegistrationTokenStore } from '@dsh-helm/store'
+import { ControlPlane, HubConnection, MeshServer, HubMcpServer, PairingService, HubHa } from '@dsh-helm/hub'
+import { CP_NODE_PREFIX, DEFAULT_CP_LEASE_RENEW_MS, DEFAULT_CP_LEASE_TTL_MS, DEFAULT_CP_PRIORITY } from '@dsh-helm/protocol'
 import { DEFAULT_PORTS } from '@dsh-helm/platform'
 
 interface HubCliOptions {
@@ -27,6 +54,24 @@ interface HubCliOptions {
   mcpBind?: string
   heartbeatMs: number
   leaseMs: number
+  /** Control-plane peer ws URLs (dual-CP; empty = standalone). */
+  cpPeers: string[]
+  cpId: string
+  cpToken: string
+  cpPriority: number
+  cpFailoverMs: number
+  /** Write-lease renew interval (ms); must stay below cpFailoverMs. */
+  leaseRenewMs: number
+}
+
+/** cpId fallback: the local node.json node_id (same file the agent uses). */
+export function readNodeIdFromNodeJson(): string {
+  try {
+    const raw = JSON.parse(readFileSync(`${process.env.HOME ?? '.'}/.dsh/helm/node.json`, 'utf8')) as { node_id?: string }
+    return raw.node_id ?? ''
+  } catch {
+    return ''
+  }
 }
 
 export function parseHubArgs(argv: string[]): HubCliOptions {
@@ -39,6 +84,12 @@ export function parseHubArgs(argv: string[]): HubCliOptions {
     bind: '127.0.0.1',
     heartbeatMs: 15_000,
     leaseMs: 45_000,
+    cpPeers: [],
+    cpId: '',
+    cpToken: '',
+    cpPriority: DEFAULT_CP_PRIORITY,
+    cpFailoverMs: DEFAULT_CP_LEASE_TTL_MS,
+    leaseRenewMs: DEFAULT_CP_LEASE_RENEW_MS,
   }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!
@@ -57,6 +108,13 @@ export function parseHubArgs(argv: string[]): HubCliOptions {
       case '--mcp-bind': opts.mcpBind = next(); break
       case '--heartbeat-ms': opts.heartbeatMs = Number(next()); break
       case '--lease-ms': opts.leaseMs = Number(next()); break
+      case '--cp-peer': opts.cpPeers.push(next()); break
+      case '--cp-id': opts.cpId = next(); break
+      case '--cp-token': opts.cpToken = next(); break
+      case '--cp-token-env': opts.cpToken = process.env[next()] ?? ''; break
+      case '--cp-priority': opts.cpPriority = Number(next()); break
+      case '--cp-failover-ms': opts.cpFailoverMs = Number(next()); break
+      case '--cp-lease-renew-ms': opts.leaseRenewMs = Number(next()); break
       default: throw new Error(`unknown hub option: ${a}`)
     }
   }
@@ -73,13 +131,25 @@ export function tokenLookupFromEnv(env: string | undefined): (nodeId: string) =>
   return (id) => map.get(id)
 }
 
-export function startHub(opts: HubCliOptions, log: (l: string) => void = console.log): { cp: ControlPlane; mesh: MeshServer; mcp: HubMcpServer; mcpHttp: ReturnType<typeof createServer>; store: DshHelmStore } {
+/** True when a listen address is loopback-only (pairing endpoints require it). */
+export function isLoopbackHost(host: string): boolean {
+  return host === '127.0.0.1' || host === '::1' || host === 'localhost' || host === '::ffff:127.0.0.1' || host.startsWith('127.')
+}
+
+export function startHub(opts: HubCliOptions, log: (l: string) => void = console.log): { cp: ControlPlane; mesh: MeshServer; mcp: HubMcpServer; mcpHttp: ReturnType<typeof createServer>; store: DshHelmStore; pairing: PairingService; ha: HubHa } {
   const store = new DshHelmStore({ file: opts.storeFile })
   const nodes = new NodeRegistry(store.db)
   const sessions = new SessionCatalog(store.db)
   const workspaces = new WorkspaceCatalog(store.db)
   const presence = new PresenceRegistry(store.db)
   const connections = new Map<string, HubConnection>()
+  // Token lookup: env DSH_HELM_TOKEN first, then the persisted enrollment
+  // registration_tokens table — freshly paired nodes authenticate without
+  // any hub env var changes. Peer hubs authenticate with `cp:<cp_id>` keys
+  // in the same table (or env).
+  const envTokenLookup = tokenLookupFromEnv(process.env.DSH_HELM_TOKEN)
+  const registrationTokens = new RegistrationTokenStore(store.db)
+  const tokenLookup = (nodeId: string): string | undefined => envTokenLookup(nodeId) ?? registrationTokens.get(nodeId)
   const cp = new ControlPlane({
     store, nodes, sessions, workspaces, presence,
     hubId: opts.hubId,
@@ -87,14 +157,74 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
     heartbeatMs: opts.heartbeatMs,
     leaseMs: opts.leaseMs,
     defaultNodeId: opts.defaultNodeId,
-    tokenLookup: tokenLookupFromEnv(process.env.DSH_HELM_TOKEN),
+    tokenLookup,
     connections,
     log,
   })
-  const mesh = new MeshServer({ cp, port: opts.meshPort, host: opts.bind })
-  const mcp = new HubMcpServer({ cp, log })
+  const pairing = new PairingService({ cp, store, log })
+  cp.pairing = pairing
+  // Control-plane HA: identity defaults to --default-node, else the local
+  // node.json node_id, else the hub id.
+  const cpId = opts.cpId || opts.defaultNodeId || readNodeIdFromNodeJson() || opts.hubId
+  const ha = new HubHa({
+    cpId,
+    priority: opts.cpPriority,
+    peerUrls: opts.cpPeers,
+    cpToken: opts.cpToken,
+    tokenLookup,
+    store,
+    nodes,
+    connections,
+    leaseMs: opts.leaseMs,
+    leaseTtlMs: opts.cpFailoverMs,
+    leaseRenewMs: opts.leaseRenewMs,
+    log,
+  })
+  cp.attachHa(ha)
+  const mesh = new MeshServer({
+    cp,
+    port: opts.meshPort,
+    host: opts.bind,
+    rpcExtras: (peer, nodeId) => {
+      if (nodeId.startsWith(CP_NODE_PREFIX)) ha.registerInboundPeer(nodeId.slice(CP_NODE_PREFIX.length), peer)
+    },
+    connectionClosed: (nodeId) => {
+      if (nodeId?.startsWith(CP_NODE_PREFIX)) ha.onPeerDisconnected(nodeId.slice(CP_NODE_PREFIX.length), 'inbound')
+    },
+  })
+  const mcp = new HubMcpServer({ cp, ha, log })
+  const mcpAddr = opts.mcpBind ?? opts.bind
+  const pairEligible = isLoopbackHost(mcpAddr)
   // Streamable HTTP transport for the MCP surface (same shape as the daemon).
   const mcpHttp = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/cp-status') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(ha.statusPayload()))
+      return
+    }
+    if (req.method === 'GET' && (req.url === '/pair/new' || req.url === '/pair/list')) {
+      void (async () => {
+        try {
+          if (!pairEligible) {
+            res.writeHead(403, { 'content-type': 'application/json' })
+            res.end(JSON.stringify({ error: 'pairing endpoints require the hub MCP to bind loopback (127.0.0.1)' }))
+            return
+          }
+          if (req.url === '/pair/new') {
+            const pair = await pairing.createPairingCode()
+            res.writeHead(200, { 'content-type': 'application/json' })
+            res.end(JSON.stringify(pair))
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ codes: pairing.listCodes(20) }))
+        } catch (err) {
+          res.writeHead(500, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }))
+        }
+      })()
+      return
+    }
     if (req.method === 'POST' && req.url === '/mcp') {
       let body = ''
       req.on('data', (c) => (body += c))
@@ -144,10 +274,11 @@ export function startHub(opts: HubCliOptions, log: (l: string) => void = console
     res.writeHead(404)
     res.end()
   })
-  const mcpAddr = opts.mcpBind ?? opts.bind
   mcpHttp.listen(opts.mcpPort, mcpAddr, () => log(`hub MCP listening on ${mcpAddr}:${opts.mcpPort}`))
   log(`hub mesh listening on ${opts.bind}:${opts.meshPort} (hubId=${opts.hubId})`)
-  return { cp, mesh, mcp, mcpHttp, store }
+  ha.start()
+  if (opts.cpPeers.length > 0) log(`hub HA enabled: cpId=${cpId} peers=${opts.cpPeers.join(',')} priority=${opts.cpPriority} failover=${opts.cpFailoverMs}ms`)
+  return { cp, mesh, mcp, mcpHttp, store, pairing, ha }
 }
 
 // CLI entry (only when run directly)
@@ -155,8 +286,9 @@ const isMain = process.argv[1] && (process.argv[1].endsWith('hub.js') || process
 if (isMain) {
   try {
     const opts = parseHubArgs(process.argv.slice(2))
-    const { mesh, mcpHttp, store, cp } = startHub(opts)
+    const { mesh, mcpHttp, store, cp, ha } = startHub(opts)
     const shutdown = () => {
+      ha.stop()
       void mesh.close()
       mcpHttp.close()
       cp.stop()

@@ -9,8 +9,8 @@
  * messages via the outbound callback.
  */
 
-import type { WireMessage } from '@dsh-helm/protocol'
-import { HandshakeServer, RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
+import type { AuthMessage, WireMessage } from '@dsh-helm/protocol'
+import { ENROLL_NODE_ID_PREFIX, HUB_METHODS, HandshakeServer, RpcPeer, type MessagePeer } from '@dsh-helm/protocol'
 import { ControlPlane, hubRpcHandlers, type NodeConnection } from './control-plane.js'
 
 export interface HubConnectionOptions {
@@ -19,6 +19,9 @@ export interface HubConnectionOptions {
   send: (msg: WireMessage) => void
   /** Called when the connection is fully closed (auth failed or socket closed). */
   onClose?: (nodeId?: string) => void
+  /** Optional extra RPC handlers registered after the hub handlers (e.g. the
+   *  `cp.*` surface for control-plane peer connections). */
+  rpcExtras?: (peer: RpcPeer, nodeId: string) => void
 }
 
 export class HubConnection implements NodeConnection {
@@ -29,11 +32,13 @@ export class HubConnection implements NodeConnection {
   private handshake!: HandshakeServer
   private closed = false
   private onCloseCb?: (nodeId?: string) => void
+  private rpcExtras?: (peer: RpcPeer, nodeId: string) => void
 
   constructor(opts: HubConnectionOptions) {
     this.cp = opts.cp
     this.sendFn = opts.send
     this.onCloseCb = opts.onClose
+    this.rpcExtras = opts.rpcExtras
     this.handshake = new HandshakeServer(
       { send: (m) => this.sendFn(m) },
       {
@@ -44,7 +49,7 @@ export class HubConnection implements NodeConnection {
         lookupToken: (id) => this.cp.lookupToken(id),
       },
       {
-        onWelcome: (hello) => this.authenticated(hello.node_id),
+        onWelcome: (hello, auth) => this.authenticated(hello.node_id, auth),
         onError: (code, message) => {
           this.cp.log(`handshake error from ${this.nodeId || 'unknown'}: ${code} ${message}`)
           this.close()
@@ -99,16 +104,40 @@ export class HubConnection implements NodeConnection {
     this.onCloseCb?.(nodeId)
   }
 
-  private authenticated(nodeId: string): void {
+  private authenticated(nodeId: string, auth?: AuthMessage): void {
     this.nodeId = nodeId
     const peer: MessagePeer = {
       send: (m) => this.sendFn({ type: 'rpc', v: this.cp.schemaVersion, body: m } as WireMessage),
     }
-    this.peer = new RpcPeer(peer, (l) => this.cp.log(`[node ${nodeId}] ${l}`))
+    this.peer = new RpcPeer(peer, (l) => this.cp.log(`[${nodeId}] ${l}`))
+    if (auth === undefined) {
+      // Unauthenticated enrollment connection (hello.node_id = enroll:<uuid>):
+      // offers exactly ONE RPC (enrollment.consume), is never registered in
+      // the routing table, and is closed after a successful exchange (or when
+      // the peer exceeds its rate budget). See docs/security.md.
+      this.cp.log(`enroll connection accepted: ${nodeId} (unauthenticated, enroll-only)`)
+      if (!nodeId.startsWith(ENROLL_NODE_ID_PREFIX)) {
+        this.cp.log(`enroll-mode connection with unexpected node_id: ${nodeId}`)
+      }
+      this.peer.on(HUB_METHODS.ENROLLMENT_CONSUME, (p) => this.handleEnrollConsume(p))
+      return
+    }
     const handlers = hubRpcHandlers(this.cp, nodeId)
     for (const [method, handler] of Object.entries(handlers)) {
       this.peer.on(method, handler)
     }
+    this.rpcExtras?.(this.peer, nodeId)
     this.cp.onNodeAuthenticated(nodeId, this)
+  }
+
+  /** One-shot enrollment.consume on an unauthenticated enroll connection. */
+  private async handleEnrollConsume(params: unknown): Promise<unknown> {
+    const res = await this.cp.consumeEnrollment(params, this.nodeId)
+    // Close once the exchange is done: after a successful consume (token
+    // delivered) or when the per-connection rate budget is exhausted.
+    if (res.ok || (!res.ok && res.reason === 'rate_limited')) {
+      setTimeout(() => this.close(), 25)
+    }
+    return res
   }
 }

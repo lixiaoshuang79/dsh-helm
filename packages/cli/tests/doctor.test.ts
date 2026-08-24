@@ -284,7 +284,7 @@ describe('runDoctor', () => {
     expect(code).toBe(0)
 
     const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n')
-    for (const heading of ['## 依赖', '## 本机配置', '## hub 连通性', '## MCP', '## tunnel', '## 服务', '## 端口']) {
+    for (const heading of ['## 依赖', '## 本机配置', '## hub 连通性', '## MCP', '## 控制面 HA', '## tunnel', '## 服务', '## 端口']) {
       expect(output).toContain(heading)
     }
     // node_id 只以 redact 形式出现；token 与完整 id 绝不出现

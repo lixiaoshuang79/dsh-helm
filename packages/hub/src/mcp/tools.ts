@@ -231,5 +231,25 @@ export const TOOLS: ToolDef[] = [
 
 export const TOOL_BY_NAME: Map<string, ToolDef> = new Map(TOOLS.map((t) => [t.name, t]))
 
+/**
+ * Mutating tools that must run on the single writer leader in dual-CP mode.
+ * These either change hub-local state (presence_*) or issue write directives
+ * to nodes (sessions_*, code_use_workspace). A follower forwards every call
+ * in this set to the leader's HTTP MCP endpoint; everything else is
+ * read-only / discovery and executes locally on the synced registry.
+ *
+ * Keep in sync with TOOLS: the anti-regression test asserts this set covers
+ * every tool whose danger is write or destructive.
+ */
+export const WRITE_TOOLS: ReadonlySet<string> = new Set([
+  'code_use_workspace',
+  'sessions_create',
+  'sessions_resume',
+  'sessions_prompt',
+  'sessions_cancel',
+  'presence_claim',
+  'presence_release',
+])
+
 /** Upstream-compatible tools (the 19 the tunnel already exposes). */
 export const COMPAT_TOOLS = TOOLS.filter((t) => !t.name.startsWith('nodes_') && !t.name.startsWith('node_') && !t.name.startsWith('route_') && !t.name.startsWith('presence_'))

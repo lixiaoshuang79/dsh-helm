@@ -38,6 +38,9 @@ importers:
       '@dsh-helm/platform':
         specifier: workspace:*
         version: link:../platform
+      '@dsh-helm/protocol':
+        specifier: workspace:*
+        version: link:../protocol
 
   packages/dashboard:
     dependencies:

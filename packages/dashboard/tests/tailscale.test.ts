@@ -96,7 +96,7 @@ describe('parseTailscaleStatusJson', () => {
       Peer: {
         'nodekey:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa': {
           HostName: 'home',
-          TailscaleIPs: ['100.88.219.39'],
+          TailscaleIPs: ['100.64.0.1'],
           Online: true,
           LastSeen: '2026-08-24T00:00:00Z',
           OS: 'macOS',
@@ -107,7 +107,7 @@ describe('parseTailscaleStatusJson', () => {
     })
     const { self, peers } = parseTailscaleStatusJson(json)
     expect(self?.hostName).toBe('self')
-    expect(peers).toEqual([{ hostName: 'home', ips: ['100.88.219.39'], online: true, lastSeen: '2026-08-24T00:00:00Z', os: 'macOS' }])
+    expect(peers).toEqual([{ hostName: 'home', ips: ['100.64.0.1'], online: true, lastSeen: '2026-08-24T00:00:00Z', os: 'macOS' }])
     expect(JSON.stringify(peers)).not.toMatch(/tskey|PublicKey|AuthKey|nodekey:/)
   })
 })

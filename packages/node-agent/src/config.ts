@@ -13,8 +13,11 @@ import { hostname } from 'node:os'
 export interface NodeAgentConfig {
   /** Stable identity UUID. */
   node_id: string
-  /** Hub WebSocket URL, e.g. wss://hub.example.com/ (ws:// loopback/test ok). */
+  /** Primary hub WebSocket URL, e.g. wss://hub.example.com/ (ws:// loopback/test ok). */
   hub_url: string
+  /** Fallback control-plane endpoints tried in order when hub_url is
+   *  unreachable (dual-CP HA). Empty = single-endpoint behavior. */
+  fallback_urls: string[]
   /** Secret token for hub auth. */
   token: string
   /** Local helm daemon MCP endpoint (loopback only). */
@@ -32,6 +35,7 @@ export interface NodeAgentConfig {
 export interface NodeConfigFile {
   node_id?: string
   hub_url?: string
+  fallback_urls?: string[]
   token?: string
   local_mcp_url?: string
   local_mcp_token?: string
@@ -65,6 +69,7 @@ export function loadConfig(dir?: string, file?: NodeConfigFile): NodeAgentConfig
   const cfg: NodeAgentConfig = {
     node_id,
     hub_url: merged.hub_url ?? '',
+    fallback_urls: merged.fallback_urls ?? [],
     token,
     local_mcp_url: merged.local_mcp_url ?? DEFAULT_LOCAL_MCP,
     local_mcp_token: merged.local_mcp_token ?? '',

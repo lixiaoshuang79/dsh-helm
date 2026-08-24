@@ -130,6 +130,9 @@ function applyMigration(db: DatabaseLike, version: number): void {
     case 1:
       applyV1(db)
       return
+    case 2:
+      applyV2(db)
+      return
     default:
       throw new Error(`unknown migration target v${version}`)
   }
@@ -212,5 +215,32 @@ function applyV1(db: DatabaseLike): void {
       explicit  INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_route_log_ts ON route_log (ts);
+  `)
+}
+
+/**
+ * v2: device enrollment (pairing) tables.
+ * enrollment_codes stores only sha256(code) — never the plaintext pairing
+ * code. registration_tokens is the persisted node token lookup that lets a
+ * freshly enrolled node authenticate without touching hub env vars.
+ */
+function applyV2(db: DatabaseLike): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS enrollment_codes (
+      code_hash   TEXT PRIMARY KEY,   -- sha256(code) hex; plaintext never stored
+      expires_at  TEXT NOT NULL,
+      status      TEXT NOT NULL DEFAULT 'pending',  -- pending|consumed|locked
+      fail_count  INTEGER NOT NULL DEFAULT 0,
+      created_at  TEXT NOT NULL,
+      consumed_at TEXT,
+      consumed_by TEXT
+    );
+    CREATE INDEX IF NOT EXISTS idx_enrollment_codes_created ON enrollment_codes (created_at);
+
+    CREATE TABLE IF NOT EXISTS registration_tokens (
+      node_id    TEXT PRIMARY KEY,
+      token      TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `)
 }

@@ -1,18 +1,33 @@
 /**
  * Read-only control-plane dashboard: a single loopback HTTP server that
- * aggregates hub / tunnel / tailscale / service status for humans.
- * Deliberately dependency-light (node:http only) — no framework needed for
- * two routes and a static file.
+ * aggregates hub / tunnel / tailscale / service status for humans, plus the
+ * device enrollment (pairing) API.
+ *
+ * Security:
+ * - Binds 127.0.0.1 only (loopback).
+ * - Every /api/pair* mutation requires `X-Dashboard-Token` — a random token
+ *   generated at startup and injected into index.html at serve time. This
+ *   defeats cross-site requests: a foreign origin cannot read the token
+ *   (no CORS headers are emitted), so its preflight always fails.
+ * - GET /api/status stays read-only and unauthenticated (no secrets).
+ *
+ * Pairing flows through the hub's own loopback endpoints (GET /pair/new,
+ * GET /pair/list on :3471); this server never holds pairing codes itself.
  */
 
 import http from 'node:http'
+import { randomBytes } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { collectStatus, type DashboardStatus } from './status.js'
+import { buildJoinTip, fetchHubPairCode, fetchHubPairList, type HubPairListEntry } from './pair.js'
 
 export const DEFAULT_DASHBOARD_PORT = 3480
 export const DEFAULT_DASHBOARD_HOST = '127.0.0.1'
+
+/** Marker replaced with the runtime dashboard token when serving index.html. */
+export const DASHBOARD_TOKEN_MARKER = '__DSH_DASHBOARD_TOKEN__'
 
 /**
  * Resolved relative to this module: `src/../public` in dev (vitest) and
@@ -25,6 +40,12 @@ export interface DashboardServerOptions {
   host?: string
   /** Injectable status source (tests inject a fake; defaults to collectStatus). */
   statusFetcher?: () => Promise<DashboardStatus>
+  /** Hub HTTP origin for pairing endpoints (default http://127.0.0.1:3471). */
+  pairHubUrl?: string
+  /** Injectable tailscale IPv4 source for the join tip (default: platform probe). */
+  tailscaleIpFetcher?: () => Promise<string | null>
+  /** Fixed dashboard token (tests); default: random 16 bytes hex. */
+  dashboardToken?: string
 }
 
 export interface StartedDashboard {
@@ -39,14 +60,33 @@ function sendJson(res: http.ServerResponse, statusCode: number, data: unknown): 
 
 /**
  * Start the dashboard HTTP server. Routes:
- *   GET /api/status -> aggregated status JSON
- *   GET /           -> public/index.html (only whitelisted file, no traversal)
+ *   GET  /api/status        -> aggregated status JSON (read-only)
+ *   POST /api/pair          -> { code, expiresAt, tip } (X-Dashboard-Token)
+ *   GET  /api/pair/status   -> { codes: [...] } (X-Dashboard-Token)
+ *   OPTIONS /api/pair*      -> 204 preflight (no CORS headers: same-origin only)
+ *   GET  /                  -> public/index.html (only whitelisted file, no traversal)
  * Everything else -> 404.
  */
 export async function startDashboard(opts: DashboardServerOptions = {}): Promise<StartedDashboard> {
   const host = opts.host ?? DEFAULT_DASHBOARD_HOST
   const port = opts.port ?? DEFAULT_DASHBOARD_PORT
   const statusFetcher = opts.statusFetcher ?? collectStatus
+  const pairHubUrl = opts.pairHubUrl ?? 'http://127.0.0.1:3471'
+  const tailscaleIpFetcher = opts.tailscaleIpFetcher
+  const dashboardToken = opts.dashboardToken ?? randomBytes(16).toString('hex')
+
+  const authorized = (req: http.IncomingMessage): boolean => req.headers['x-dashboard-token'] === dashboardToken
+
+  const serveIndex = async (res: http.ServerResponse): Promise<void> => {
+    let html = await readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
+    // Server-side token injection: the page needs the token for /api/pair*.
+    // Split/replace so every occurrence of the marker becomes the token.
+    if (html.includes(DASHBOARD_TOKEN_MARKER)) {
+      html = html.split(DASHBOARD_TOKEN_MARKER).join(dashboardToken)
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+    res.end(html)
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -56,10 +96,39 @@ export async function startDashboard(opts: DashboardServerOptions = {}): Promise
         sendJson(res, 200, status)
         return
       }
+      if (url.pathname.startsWith('/api/pair')) {
+        // Cross-origin preflight: browsers MUST preflight because of the
+        // custom header; we emit no access-control-allow-origin, so any
+        // cross-origin caller (which cannot read the token) is blocked.
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, {
+            'access-control-allow-methods': 'POST, GET, OPTIONS',
+            'access-control-allow-headers': 'content-type, x-dashboard-token',
+            'access-control-max-age': '600',
+          })
+          res.end()
+          return
+        }
+        if (!authorized(req)) {
+          sendJson(res, 401, { error: 'missing or invalid X-Dashboard-Token' })
+          return
+        }
+        if (req.method === 'POST' && url.pathname === '/api/pair') {
+          const pair = await fetchHubPairCode(pairHubUrl)
+          const tip = await buildJoinTip(pair.code, tailscaleIpFetcher)
+          sendJson(res, 200, { ...pair, tip })
+          return
+        }
+        if (req.method === 'GET' && url.pathname === '/api/pair/status') {
+          const codes: HubPairListEntry[] = await fetchHubPairList(pairHubUrl)
+          sendJson(res, 200, { codes })
+          return
+        }
+        sendJson(res, 404, { error: 'not found' })
+        return
+      }
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-        const html = await readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8')
-        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-        res.end(html)
+        await serveIndex(res)
         return
       }
       res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' })

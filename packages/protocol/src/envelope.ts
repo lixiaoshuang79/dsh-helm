@@ -140,4 +140,11 @@ export const HUB_METHODS = {
   NODE_RELEASE: 'node.release',
   CATALOG_RECONCILE: 'catalog.reconcile',
   PRESENCE_REPORT: 'presence.report',
+  /**
+   * Exchange a one-time pairing code for a long-lived node token.
+   * Callable from authenticated connections AND from unauthenticated
+   * enrollment connections (node_id = `enroll:<uuid>`); the hub rate-limits
+   * and closes enroll connections after one successful consume.
+   */
+  ENROLLMENT_CONSUME: 'enrollment.consume',
 } as const

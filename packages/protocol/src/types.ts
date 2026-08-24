@@ -205,3 +205,47 @@ export interface AuditEntry {
   /** Result summary: 'ok' | 'error:<code>' | 'rejected'. */
   result: string
 }
+
+// ---- Control-plane HA (dual-CP) wire types ----
+
+/** One node entry in the CP-to-CP registry sync. */
+export interface CpSyncNode {
+  node_id: string
+  display_name: string
+  /** Whether the REPORTING cp has a live direct connection to this node. */
+  connected: boolean
+  /** ISO timestamp of the node's last heartbeat, as seen by the reporting cp. */
+  last_seen?: string
+  /** 'online' | 'offline' | 'blocked' as seen by the reporting cp. */
+  status: string
+  platform?: PlatformInfo
+  versions?: ComponentVersions
+  capabilities?: NodeCapabilities
+  health?: HealthReport
+}
+
+/** Leader/heartbeat state exchanged between CP peers over the node mesh. */
+export interface CpPeerState {
+  /** Sender cp_id. */
+  from: string
+  /** Election priority (smallest wins; tie -> smaller cp_id). */
+  priority: number
+  /** Persisted term of the sender (fencing). */
+  term: number
+  /** cp_id the sender currently recognizes as leader ('' when undecided). */
+  leader: string
+  /** Term under which that leader was elected (0 when none). */
+  leaderTerm: number
+  /**
+   * Sender's HA phase: 'nominating' | 'leader-leased' | 'read-only-no-quorum'
+   * | 'follower' | 'standalone'. Written by HubHa; optional for wire compat.
+   */
+  phase?: string
+  /** Write-lease epoch (term of the lease currently held; 0 = none). */
+  leaseEpoch?: number
+  /** Registry entries (full on cp.sync, diff on cp.heartbeat). */
+  registry: CpSyncNode[]
+}
+
+/** Role of a control-plane instance. */
+export type CpRole = 'leader' | 'follower' | 'standalone'

@@ -16,15 +16,20 @@ import type {
   WelcomeMessage,
   WireMessage,
 } from './envelope.js'
-import { PROTOCOL_ERROR } from './constants.js'
+import { ENROLL_NODE_ID_PREFIX, PROTOCOL_ERROR } from './constants.js'
 
 export interface HandshakeSender {
   send(msg: WireMessage): void
 }
 
 export interface HandshakeServerCallbacks {
-  /** Verified identity and socket nonce; token lookup returned the token. */
-  onWelcome(hello: HelloMessage, auth: AuthMessage, hubId: string, schemaVersion: number, heartbeatMs: number, leaseMs: number): void
+  /**
+   * Verified identity and socket nonce; token lookup returned the token.
+   * `auth` is undefined on the unauthenticated enrollment path
+   * (hello.node_id starts with ENROLL_NODE_ID_PREFIX) — the connection must
+   * then be treated as enroll-only (one enrollment.consume RPC, then close).
+   */
+  onWelcome(hello: HelloMessage, auth: AuthMessage | undefined, hubId: string, schemaVersion: number, heartbeatMs: number, leaseMs: number): void
   onError(code: number, message: string): void
 }
 
@@ -62,6 +67,19 @@ export class HandshakeServer {
           this.fail(PROTOCOL_ERROR.VERSION_MISMATCH, `protocol version mismatch: client ${msg.v}, server ${this.opts.schemaVersion}`)
           return
         }
+        // Unauthenticated enrollment path: a device that has no token yet
+        // connects with node_id = `enroll:<uuid>` (see docs/security.md).
+        // No challenge/auth — the hub welcomes it and the connection is
+        // restricted to one enrollment.consume RPC before it is closed.
+        // This is an explicit opt-in path, not a downgrade: normal nodes
+        // (UUID node_ids) still go through the HMAC challenge below.
+        if (msg.node_id.startsWith(ENROLL_NODE_ID_PREFIX)) {
+          this.hello = msg
+          this.done = true
+          this.cb.onWelcome(msg, undefined, this.opts.hubId, this.opts.schemaVersion, this.opts.heartbeatMs, this.opts.leaseMs)
+          this.sender.send(this.welcomeMessage())
+          return
+        }
         this.clientNonce = msg.nonce
         this.serverNonce = generateNonce()
         this.hello = msg
@@ -85,22 +103,25 @@ export class HandshakeServer {
           return
         }
         this.done = true
-        const welcome: WelcomeMessage = {
-          type: 'welcome',
-          v: this.opts.schemaVersion,
-          hub_id: this.opts.hubId,
-          schema_version: this.opts.schemaVersion,
-          heartbeat_ms: this.opts.heartbeatMs,
-          lease_ms: this.opts.leaseMs,
-        }
         // Local auth callback first so the RPC peer is ready before the
         // client receives welcome and starts issuing requests.
         this.cb.onWelcome(this.hello, msg, this.opts.hubId, this.opts.schemaVersion, this.opts.heartbeatMs, this.opts.leaseMs)
-        this.sender.send(welcome)
+        this.sender.send(this.welcomeMessage())
         return
       }
       default:
         return
+    }
+  }
+
+  private welcomeMessage(): WelcomeMessage {
+    return {
+      type: 'welcome',
+      v: this.opts.schemaVersion,
+      hub_id: this.opts.hubId,
+      schema_version: this.opts.schemaVersion,
+      heartbeat_ms: this.opts.heartbeatMs,
+      lease_ms: this.opts.leaseMs,
     }
   }
 

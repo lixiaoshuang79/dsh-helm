@@ -8,7 +8,7 @@
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import { configPaths, currentOs } from '@dsh-helm/platform'
-import { DEFAULT_HUB_URL, fetchHubStatus, type HubStatus } from './hub.js'
+import { DEFAULT_HUB_URL, DEFAULT_HUB_TIMEOUT_MS, fetchHubStatus, type HubStatus } from './hub.js'
 import { redactTunnelId } from './redact.js'
 import { collectServices, type ServiceInfo } from './services.js'
 import { collectTailscaleStatus, type TailscaleStatus } from './tailscale.js'
@@ -24,10 +24,33 @@ export interface DashboardRole {
   hubUrl?: string
 }
 
+/** Control-plane HA status pulled from GET /cp-status (never throws). */
+export interface DashboardHaStatus {
+  cpId?: string
+  role?: 'leader' | 'follower' | 'standalone'
+  phase?: 'nominating' | 'leader-leased' | 'read-only-no-quorum' | 'follower' | 'standalone'
+  term?: number
+  leaderId?: string
+  /** 'readwrite' = this hub may serve writes; 'readonly' = writes refused/forwarded. */
+  writeMode?: 'readwrite' | 'readonly'
+  /** 2/2 quorum: both control planes mutually reachable (standalone: true). */
+  quorum?: boolean
+  /** Term of the currently held write lease (0 = none). */
+  leaseEpoch?: number
+  peers?: Array<{ cpId: string; url: string; connected: boolean; lastSeen: number; role: string }>
+  syncOk?: boolean
+  failoverCount?: number
+  lastFailoverAt?: string
+  /** Present when the probe itself failed (hub down / old hub without /cp-status). */
+  error?: string
+}
+
 export interface DashboardStatus {
   generatedAt: string
   role: DashboardRole
   hub: HubStatus
+  /** Control-plane HA (dual-CP) status; { error } when the probe failed. */
+  ha: DashboardHaStatus
   tunnel: TunnelStatus
   tailscale: TailscaleStatus
   services: ServiceInfo[]
@@ -71,6 +94,21 @@ async function readNodeConfig(file: string): Promise<NodeConfig | null> {
   }
 }
 
+/**
+ * Probe the hub's control-plane HA status (GET /cp-status). Never throws:
+ * every failure becomes `{ error }` so the dashboard renders a per-section
+ * error instead of dying.
+ */
+export async function fetchHaStatus(hubUrl: string, timeoutMs = DEFAULT_HUB_TIMEOUT_MS): Promise<DashboardHaStatus> {
+  try {
+    const res = await fetch(new URL('/cp-status', hubUrl), { signal: AbortSignal.timeout(timeoutMs) })
+    if (!res.ok) return { error: `cp-status http ${res.status}` }
+    return (await res.json()) as DashboardHaStatus
+  } catch (err) {
+    return { error: `cp-status unreachable: ${err instanceof Error ? err.message : String(err)}` }
+  }
+}
+
 /** Aggregate the full dashboard status. Never throws. */
 export async function collectStatus(opts: CollectStatusOptions = {}): Promise<DashboardStatus> {
   const nodeFile = opts.nodeFile ?? configPaths(currentOs(), os.homedir()).nodeFile
@@ -82,8 +120,9 @@ export async function collectStatus(opts: CollectStatusOptions = {}): Promise<Da
   // not an HTTP origin and must never be reused as the probe target.
   const hubUrl = opts.hubUrl ?? DEFAULT_HUB_URL
 
-  const [hub, tunnel, tailscale, services] = await Promise.all([
+  const [hub, ha, tunnel, tailscale, services] = await Promise.all([
     fetchHubStatus(hubUrl),
+    fetchHaStatus(hubUrl),
     collectTunnelStatus({ baseUrl: opts.tunnelBaseUrl, plistPath: opts.plistPath }),
     collectTailscaleStatus(),
     collectServices({ logDir: opts.logDir }),
@@ -99,6 +138,7 @@ export async function collectStatus(opts: CollectStatusOptions = {}): Promise<Da
       hubUrl,
     },
     hub,
+    ha,
     tunnel,
     tailscale,
     services,

@@ -389,7 +389,24 @@ function portsSection(platform: NodeJS.Platform, run: RunFn): DoctorSection {
 
 // ---- 主入口 ----
 
-const SECTION_NAMES = ['依赖', '本机配置', 'hub 连通性', 'MCP', 'tunnel', '服务', '端口']
+const SECTION_NAMES = ['依赖', '本机配置', 'hub 连通性', 'MCP', '控制面 HA', 'tunnel', '服务', '端口']
+
+/** 控制面 HA 一节：GET /cp-status（hub 未启用 HA 或旧版本时 warn，不判 fail）。 */
+export async function haSection(hubUrl: string, timeoutMs: number, fetchImpl: typeof fetch): Promise<DoctorSection> {
+  const lines: DoctorLine[] = []
+  const r = await httpJson(`${hubUrl}/cp-status`, { method: 'GET' }, fetchImpl, timeoutMs)
+  if (!r.ok) {
+    lines.push(line('warn', `GET /cp-status 失败：${r.error || `HTTP ${r.status}`}`))
+    return { title: '控制面 HA', status: sectionStatus(lines), lines }
+  }
+  const ha = r.body as { cpId?: string; role?: string; phase?: string; term?: number; leaderId?: string; writeMode?: string; quorum?: boolean; leaseEpoch?: number; peers?: Array<{ connected?: boolean }>; syncOk?: boolean; failoverCount?: number }
+  const peers = ha.peers ?? []
+  const connected = peers.filter((p) => p.connected === true).length
+  lines.push(line('ok', `cpId=${ha.cpId ?? '?'} role=${ha.role ?? '?'} phase=${ha.phase ?? '?'} term=${ha.term ?? '?'} leader=${ha.leaderId ?? '?'}`))
+  lines.push(line(ha.writeMode === 'readwrite' ? 'ok' : 'warn', `writeMode=${ha.writeMode ?? '?'} · quorum=${ha.quorum ?? '?'} · leaseEpoch=${ha.leaseEpoch ?? '?'}`))
+  lines.push(line(ha.syncOk ? 'ok' : 'warn', `peers ${connected}/${peers.length} connected · syncOk=${ha.syncOk ?? '?'} · failover=${ha.failoverCount ?? 0} 次`))
+  return { title: '控制面 HA', status: sectionStatus(lines), lines }
+}
 
 export async function runDoctor(_argv: string[], opts: DoctorOptions = {}): Promise<number> {
   const hubUrl = opts.hubUrl ?? 'http://127.0.0.1:3471'
@@ -406,6 +423,7 @@ export async function runDoctor(_argv: string[], opts: DoctorOptions = {}): Prom
     localConfigSection(configPath),
     await hubSection(hubUrl, timeoutMs, fetchImpl),
     await mcpSection(hubUrl, timeoutMs, fetchImpl),
+    await haSection(hubUrl, timeoutMs, fetchImpl),
     await tunnelSection(tunnelUrl, timeoutMs, fetchImpl, platform === 'darwin' ? opts.tunnelPlistPath ?? join(process.env.HOME ?? '.', 'Library', 'LaunchAgents', 'com.dsh-helm.tunnel-client.plist') : null),
     servicesSection(platform, run),
     portsSection(platform, run),
