@@ -338,9 +338,14 @@ export class HelmNodeAgent {
       session_count: 0,
     }
     try {
-      await this.peer?.request('node.heartbeat', { node_id: this.cfg.node_id, status })
+      await this.peer?.request('node.heartbeat', { node_id: this.cfg.node_id, status }, { timeoutMs: 10_000 })
     } catch (err) {
+      // Half-open socket (hub died without a close frame, network blip, ...):
+      // the request times out and nothing ever fires onclose, so without this
+      // the agent would sit on a dead connection forever. Reconnect is idempotent
+      // (scheduleReconnect no-ops while a timer is already pending).
       this.log(`heartbeat failed: ${err instanceof Error ? err.message : err}`)
+      this.scheduleReconnect('heartbeat-failed')
     }
   }
 
