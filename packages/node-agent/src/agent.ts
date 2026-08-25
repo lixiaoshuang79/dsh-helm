@@ -160,6 +160,21 @@ export class HelmNodeAgent {
   private async connect(): Promise<void> {
     if (this.stopped) return
     this.state = 'connecting'
+    // Close any previous socket, suppressing its onclose so an intentional
+    // close never schedules a reconnect. Half-open sockets (the hub accepted
+    // the TCP connection but never completed the WS handshake — e.g. while
+    // the hub itself is restarting) would otherwise pile up as leaked
+    // ESTABLISHED connections, one per reconnect attempt.
+    if (this.socket) {
+      const old = this.socket
+      this.socket = undefined
+      old.onclose = null
+      try {
+        old.close()
+      } catch {
+        /* ignore */
+      }
+    }
     // Ensure the local helm MCP session gets initialized; must NOT delay socket
     // event wiring below (ws.onopen must be set synchronously for tests/edge),
     // so fire-and-forget here and guarantee readiness in registerAndReconcile.

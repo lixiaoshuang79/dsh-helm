@@ -43,13 +43,13 @@ export function rejectionText(r: Extract<ModelGateResult, { ok: false }>): strin
       code: 'model_rejected',
       required_model: REQUIRED_MODEL,
       received: r.received,
-      message: `执行被拒绝：ChatGPT 当前模型不是 ${REQUIRED_MODEL}（收到模型声明：${r.received}）。请在 ChatGPT 切换到 GPT-5.6 Thinking 模型后重试本次指令。`,
+      message: `[模型门禁拒绝] 本次指令未执行：ChatGPT 当前模型为「${r.received}」，不是要求的 ${REQUIRED_MODEL}（GPT-5.6 Thinking）。请切换到 GPT-5.6 Thinking 模型后，以 "[model-check] 当前模型是 gpt-5-6-thinking" 开头重发同一指令。`,
     })
   }
   return JSON.stringify({
     code: 'model_declaration_required',
     required_model: REQUIRED_MODEL,
-    message: `执行被拒绝：本次调用未声明 ChatGPT 模型。请让 ChatGPT 以 "[model-check] 当前模型是 <模型全名>" 开头声明模型（必须是 ${REQUIRED_MODEL}）后重试。`,
+    message: `[模型门禁拒绝] 本次指令未执行：消息中未声明 ChatGPT 模型。请在消息第一行声明 "[model-check] 当前模型是 <模型全名>"（必须是 ${REQUIRED_MODEL} / GPT-5.6 Thinking）后重发同一指令。`,
   })
 }
 
