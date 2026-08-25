@@ -90,6 +90,8 @@ export class McpLocalHelmBackend implements LocalHelmBackend {
   private sessionId?: string
   private serverInfo?: { name?: string; version?: string }
   private nextId = 1
+  /** In-flight re-establishment attempt (daemon restarted); concurrent callers share it. */
+  private reestablishing?: Promise<void>
 
   constructor(opts: McpLocalHelmBackendOptions = {}) {
     this.url = opts.url ?? 'http://127.0.0.1:3457/mcp'
@@ -101,16 +103,19 @@ export class McpLocalHelmBackend implements LocalHelmBackend {
   /** MCP initialize; returns server info. Idempotent while a session is live. */
   async connect(): Promise<{ name?: string; version?: string }> {
     if (this.sessionId) return this.serverInfo ?? {}
-    const res = await this.post({
-      jsonrpc: '2.0',
-      id: this.nextId++,
-      method: 'initialize',
-      params: {
-        protocolVersion: '2025-03-26',
-        capabilities: {},
-        clientInfo: { name: 'dsh-helm-node-agent', version: '0.1.0' },
+    const res = await this.post(
+      {
+        jsonrpc: '2.0',
+        id: this.nextId++,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'dsh-helm-node-agent', version: '0.1.0' },
+        },
       },
-    })
+      false,
+    )
     const body = res.body as {
       result?: { serverInfo?: { name?: string; version?: string } }
       error?: { message?: string }
@@ -119,7 +124,7 @@ export class McpLocalHelmBackend implements LocalHelmBackend {
     this.serverInfo = body.result?.serverInfo
     // notify initialized (fire and forget; failure tolerated)
     try {
-      await this.post({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })
+      await this.post({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }, false)
     } catch {
       /* daemon tolerates missing notification */
     }
@@ -195,7 +200,26 @@ export class McpLocalHelmBackend implements LocalHelmBackend {
     return this.sessionId !== undefined
   }
 
-  private async post(message: unknown): Promise<{ body: unknown; headers: Headers }> {
+  /**
+   * Re-establish the MCP session after a daemon restart. Resets the stale
+   * session id and re-runs initialize; concurrent callers share one attempt
+   * (no duplicate handshakes). Falls back to a fresh attempt after failure.
+   */
+  private reestablish(): Promise<void> {
+    if (this.reestablishing) return this.reestablishing
+    this.reestablishing = (async () => {
+      this.logFn?.(`[bridge] MCP session stale (daemon restarted); re-establishing`)
+      this.sessionId = undefined
+      this.serverInfo = undefined
+      await this.connect()
+      this.logFn?.(`[bridge] MCP session re-established`)
+    })().finally(() => {
+      this.reestablishing = undefined
+    })
+    return this.reestablishing
+  }
+
+  private async post(message: unknown, allowReestablish = true): Promise<{ body: unknown; headers: Headers }> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
@@ -212,6 +236,13 @@ export class McpLocalHelmBackend implements LocalHelmBackend {
     if (sessionId) this.sessionId = sessionId
     if (!res.ok) {
       const text = await res.text().catch(() => '')
+      // Daemon restarted: its in-memory MCP session registry is gone. Drop the
+      // stale id and re-initialize once instead of failing every call until
+      // the agent itself is restarted.
+      if (allowReestablish && res.status === 404 && text.includes('unknown MCP session')) {
+        await this.reestablish()
+        return this.post(message, false)
+      }
       throw new Error(`local daemon http ${res.status}: ${text.slice(0, 200)}`)
     }
     const text = await res.text()

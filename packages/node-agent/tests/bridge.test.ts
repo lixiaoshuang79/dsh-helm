@@ -7,21 +7,43 @@ import { join } from 'node:path'
 /**
  * Fake daemon: minimal MCP streamable HTTP server over a fake fetch.
  * Responds to initialize / tools/list / tools/call with session-id management.
+ * `restartAtCall` simulates a daemon restart: from that fetch count onward the
+ * in-memory session registry is empty, so any request carrying a stale
+ * `Mcp-Session-Id` (except initialize) gets 404 unknown MCP session, while a
+ * fresh initialize issues a brand-new session id.
  */
-function fakeDaemon(opts: { failTool?: string; status?: number; requireAuth?: boolean } = {}) {
+function fakeDaemon(opts: { failTool?: string; status?: number; requireAuth?: boolean; restartAtCall?: number } = {}) {
   const calls: Array<{ method: string; params: unknown; auth?: string }> = []
   let sessionId: string | undefined
+  let callCount = 0
+  /** Daemon-side in-memory session registry (lost on restart). */
+  let registry: Record<string, boolean> = {}
+  /** One-shot restart flag (stays true after the simulated restart). */
+  let restarted = false
   const fetchImpl = async (url: string, init: { headers?: Record<string, string>; body?: string }) => {
     const body = JSON.parse(init.body ?? '{}')
     const auth = init.headers?.['Authorization'] ?? init.headers?.['authorization']
     calls.push({ method: body.method, params: body.params, auth })
+    callCount++
+    if (opts.restartAtCall && !restarted && callCount >= opts.restartAtCall) {
+      // One daemon restart: in-memory registry AND all issued session ids are lost.
+      restarted = true
+      registry = {}
+      sessionId = undefined
+    }
     if (opts.requireAuth && !auth) {
       return new Response('unauthorized', { status: 401, headers: { 'content-type': 'text/plain' } })
     }
     const headers: Record<string, string> = { 'content-type': 'application/json' }
-    if (!sessionId) {
-      sessionId = 'sess-123'
+    if (!sessionId && body.method === 'initialize') {
+      sessionId = `sess-${callCount}`
+      registry[sessionId] = true
       headers['mcp-session-id'] = sessionId
+    }
+    const mcpSid = init.headers?.['Mcp-Session-Id'] ?? init.headers?.['mcp-session-id']
+    if (mcpSid && !registry[mcpSid] && body.method !== 'initialize') {
+      // Stale session id after a restart: 404 like the real daemon, no new id in the response.
+      return new Response(JSON.stringify({ error: 'unknown MCP session' }), { status: 404, headers: { 'content-type': 'application/json' } })
     }
     if (opts.status && opts.status >= 400) {
       return new Response('daemon error', { status: opts.status, headers })
@@ -106,6 +128,32 @@ describe('McpLocalHelmBackend (LocalHelmBackend default)', () => {
     const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
     await b.connect()
     await expect(b.callTool('sessions_create', {})).rejects.toThrow(/boom/)
+  })
+
+  it('re-establishes the MCP session after a daemon restart (404 unknown MCP session)', async () => {
+    // Daemon restarts after the 3rd fetch (initialize + one call + one call).
+    const { fetchImpl, calls } = fakeDaemon({ restartAtCall: 3 })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    await b.connect()
+    // Both calls succeed transparently: the first 404 triggers a fresh
+    // initialize and the original call is retried on the new session.
+    const res = await b.callTool('sessions_list', {})
+    expect(res.structuredContent).toEqual({ sessions: [{ session_id: 's-1', status: 'idle', live: false }] })
+    // Two initialize handshakes happened: the original and the re-establishment.
+    expect(calls.filter((c) => c.method === 'initialize')).toHaveLength(2)
+    // The retried call carried the new session id (sess-3+), not the stale one.
+    expect(b.connected).toBe(true)
+  })
+
+  it('recovery is shared: concurrent calls after a restart re-establish only once', async () => {
+    const { fetchImpl, calls } = fakeDaemon({ restartAtCall: 3 })
+    const b = new McpLocalHelmBackend({ token: 'tok', fetchImpl: fetchImpl as unknown as typeof fetch })
+    await b.connect()
+    const [a, c] = await Promise.all([b.callTool('sessions_list', {}), b.callTool('sessions_list', {})])
+    expect(a.structuredContent).toEqual({ sessions: [{ session_id: 's-1', status: 'idle', live: false }] })
+    expect(c.structuredContent).toEqual({ sessions: [{ session_id: 's-1', status: 'idle', live: false }] })
+    // initialize twice: original session + one shared re-establishment.
+    expect(calls.filter((c) => c.method === 'initialize')).toHaveLength(2)
   })
 
   it('throws when daemon is unreachable', async () => {
