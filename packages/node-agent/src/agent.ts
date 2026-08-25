@@ -373,9 +373,85 @@ export class HelmNodeAgent {
 
   private lastProbeAt = 0
 
+  /** True while a return-to-primary probe is in flight. */
+  private primaryProbeInFlight = false
+
+  /**
+   * Return to the primary control plane when it comes back. A reconnect during
+   * a hub restart round-robins to a fallback and pins it (the fallback stays
+   * stable), leaving this node invisible to the primary's catalog until the
+   * agent restarts. While pinned on a fallback, probe the primary on every
+   * heartbeat; a live primary triggers a clean switch back.
+   */
+  private async tryReturnToPrimary(): Promise<void> {
+    const eps = this.endpoints()
+    if (this.stopped || this.state !== 'connected' || eps.length < 2 || this.endpointIndex === 0) return
+    if (this.primaryProbeInFlight) return
+    const primary = eps[0]!
+    this.primaryProbeInFlight = true
+    const alive = await new Promise<boolean>((resolve) => {
+      let settled = false
+      const done = (ok: boolean): void => {
+        if (settled) return
+        settled = true
+        resolve(ok)
+      }
+      let ws: WebSocketLike | undefined
+      const timer = setTimeout(() => {
+        try {
+          ws?.close()
+        } catch {
+          /* ignore */
+        }
+        done(false)
+      }, 3000)
+      try {
+        ws = this.wsFactory(primary)
+      } catch {
+        clearTimeout(timer)
+        done(false)
+        return
+      }
+      ws.onopen = () => {
+        clearTimeout(timer)
+        // Resolve BEFORE closing the probe socket: close() fires onclose
+        // synchronously in some ws implementations, and done(false) must not
+        // win the settled race against the successful probe.
+        done(true)
+        try {
+          ws?.close()
+        } catch {
+          /* ignore */
+        }
+      }
+      ws.onerror = () => {
+        clearTimeout(timer)
+        done(false)
+      }
+      ws.onclose = () => {
+        clearTimeout(timer)
+        done(false)
+      }
+    })
+    this.primaryProbeInFlight = false
+    if (!alive) return
+    this.log('primary hub reachable again; switching back')
+    this.endpointIndex = 0
+    this.scheduleReconnect('return-to-primary', false)
+    // Close the pinned fallback socket so the old connection does not linger.
+    // Its onclose fires scheduleReconnect('socket-close'), which no-ops while
+    // the return-to-primary timer above is pending.
+    try {
+      this.socket?.close()
+    } catch {
+      /* socket already gone */
+    }
+  }
+
   private async heartbeat(): Promise<void> {
     if (!this.peer) return
     this.seq++
+    void this.tryReturnToPrimary()
     // Periodic local datapath probe (local_probe_ms) so hub health aggregations
     // see real adapter/datapath/serena layers instead of the initial unknown.
     if (Date.now() - this.lastProbeAt >= this.cfg.local_probe_ms) {
@@ -555,12 +631,14 @@ export class HelmNodeAgent {
     }
   }
 
-  private scheduleReconnect(reason: string): void {
+  private scheduleReconnect(reason: string, advance = true): void {
     if (this.stopped) return
     if (this.reconnectTimer) return
     // Try the next control-plane endpoint on every reconnect (round-robin
     // over [hub_url, ...fallback_urls]); a successful connect pins the index.
-    this.advanceEndpoint()
+    // advance=false keeps the current index (used by return-to-primary, which
+    // has already reset the index to the primary).
+    if (advance) this.advanceEndpoint()
     const delay = this.backoff + Math.random() * 500
     this.backoff = Math.min(this.backoff * 2, RECONNECT_BACKOFF_MAX_MS)
     this.state = 'reconnecting'
