@@ -93,6 +93,8 @@ dsh-helm status                    # 本地配置与连接状态
 
 OpenAI Platform 侧完整教程（建 tunnel / 绑定 workspace / 建 API key / tunnel-client 参数 / 代理）见 [docs/chatgpt-tunnel-setup.md](docs/chatgpt-tunnel-setup.md)；ChatGPT Web 侧（开发者模式 / 创建连接器 / 测试）见 [docs/chatgpt-connector.md](docs/chatgpt-connector.md)。
 
+**已有单机 connector 的机器升级**：旧形态（tunnel 直连 daemon 3457）没有会话瘦身/插队/响应守卫等升级能力；按 [docs/single-connector-upgrade.md](docs/single-connector-upgrade.md) 迁移到单机兼容模式（本地 hub + agent，tunnel 指向 hub MCP 3471），ChatGPT 侧零改动即获得全部升级能力（内容瘦身 / steer 插队 / 响应守卫，见下节）。
+
 **两种拓扑取舍**：每台 daemon 各配一个 tunnel+连接器（多入口、各管各），或一个 hub tunnel + 一个连接器管 N 台节点（单入口，推荐——hub 路由 `target_node`/路由规则，回复带 `node_name`）。
 
 ## 控制面 HA（双 Control Plane）

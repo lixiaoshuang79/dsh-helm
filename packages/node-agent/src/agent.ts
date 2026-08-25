@@ -35,6 +35,8 @@ export interface NodeAgentOptions {
   leaseMs?: number
   /** 摘要缓存目录（默认 ~/.dsh/helm/summaries；测试注入临时目录）。 */
   summaryCacheDir?: string
+  /** DSH 宿主 API 的 fetch 实现（默认全局 fetch；测试注入 mock）。 */
+  steerFetch?: typeof fetch
 }
 
 /** Minimal WebSocket surface used by the agent (compatible with undici/ws). */
@@ -80,6 +82,8 @@ export class HelmNodeAgent {
     serena: { status: 'unknown' },
   }
   private hubNodeId?: string
+  /** DSH 宿主 API fetch 注入（测试 mock；缺省=全局 fetch）。 */
+  private steerFetch?: typeof fetch
 
   constructor(opts: NodeAgentOptions) {
     this.cfg = opts.config
@@ -89,6 +93,7 @@ export class HelmNodeAgent {
     this.logFn = opts.log
     this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
     this.leaseMs = opts.leaseMs ?? DEFAULT_NODE_LEASE_MS
+    this.steerFetch = opts.steerFetch
     this.summaries = new SessionSummaryService(opts.backend, {
       cacheDir: opts.summaryCacheDir ?? join(defaultConfigDir(), 'summaries'),
       log: (l) => this.log(l),
@@ -439,6 +444,7 @@ export class HelmNodeAgent {
           hostApiUrl: this.cfg.host_api_url,
           sessionId: session_id,
           message,
+          fetchImpl: this.steerFetch,
           log: (l) => this.log(l),
         })
         if (result.status === 'steered') this.summaries.invalidate(session_id)
@@ -472,6 +478,7 @@ export class HelmNodeAgent {
           hostApiUrl: this.cfg.host_api_url,
           sessionId: session_id,
           message,
+          fetchImpl: this.steerFetch,
           log: (l) => this.log(l),
         })
         if (result.status === 'steered') this.summaries.invalidate(session_id)
