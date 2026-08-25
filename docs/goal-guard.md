@@ -44,25 +44,37 @@ function requireDirectHuman(ctx, execution) {
 消息 `source.kind === "user"`，校验通过 → ChatGPT 一条长任务指令就能让 DSH 开启 goal → 回合结束
 goal 自动注入下一段（`source.kind:"goal"`）自主续跑，不听 ChatGPT 指挥。
 
-## 修复内容（patches/goal-guard.mjs，幂等）
+## 修复内容（patches/goal-guard.mjs v2，幂等）
 
-对插件 `lib/index.js` 三处修改：
+### A. 插件 `lib/index.js`
 
 | # | 位置 | 修改 |
 |---|------|------|
-| 1 | `createSession` initialMessage 注入 | `source:{kind:"user"}` → `source:{kind:"plugin",plugin:"dsh-chatgpt-helm",form:"relay"}` |
+| 1 | `createSession` initialMessage 注入 | `source:{kind:"user"}` → `source:{kind:"user",relayedBy:"dsh-chatgpt-helm"}` |
 | 2 | `prompt()` 消息注入 | 同上；并在注入前：会话存在 active goal 时自动 `goals.pause(agent, ref)`（disarm 自动续跑） |
 | 3 | `inject` 数组 | 追加 `"goals"` 服务 |
 
-`MessageSource` 是 merge-extensible 联合类型（内置 `user`/`plugin`/`model`/`tool`），
-`plugin` 是合法来源；`hasDirectHumanInput` 只认 `user`，因此：
+### B. DSH 核心 `@deepseek-ai/dsh-tool-goal` `lib/index.js`
+
+```js
+// 只认「真正的」直接人类输入：排除 helm 转发的带 relayedBy 标记的消息
+event.data.source.kind === "user" && event.data.source.relayedBy === void 0
+```
+
+v2 与 v1 的差别：注入 source 保持 `user`（消息在 DSH GUI 正常显示原文、模型历史与本人消息
+语义一致），但多带 `relayedBy:"dsh-chatgpt-helm"` 标记；DSH 侧权威校验（hasDirectHumanInput）
+排除该标记。这样「**消息可见**」与「**goal 权威拒绝**」同时成立：
 
 - 从 ChatGPT 来的指令**无法创建 goal**（`GOAL_TOOL_DRIVER_REQUIRED` 拒绝）；
 - 系统提示里 goal guidance 的「direct human request」推断前提不再成立；
 - 会话若已有 active goal（GUI 或其他渠道建的），收到 ChatGPT 指令时自动暂停，
   回合结束后不再自动注入下一段——ChatGPT 的指挥重新生效；
-- 本机 GUI 不受影响：web 界面发消息是真正的用户输入（`source.kind:"user"`），
-  可照常创建/恢复 goal。
+- 本机 GUI 不受影响：web 界面发消息无 relayedBy 标记，可照常创建/恢复 goal；
+- 其他注入渠道（如 TG 桥）不带 relayedBy，行为不变。
+
+> ⚠️ 注册表/存储校验：`MessageSource` 是 merge-extensible 联合类型但运行时不校验额外字段，
+> `relayedBy` 可安全附加。DSH 升级（npm 换版本）会覆盖 dsh-tool-goal，插件重装会覆盖
+> lib/index.js——两者都需重跑本补丁。
 
 ## 应用与验证
 
@@ -78,15 +90,17 @@ launchctl kickstart -k gui/$(id -u)/com.ashuang.dsh-web-local
 
 1. `sessions_create` 建会话，`sessions_prompt` 发「创建一个 goal 来持续优化…并自动续跑」——
    `session.history` 事件流中该消息 `source` 为
-   `{"kind":"plugin","plugin":"dsh-chatgpt-helm","form":"relay"}`；全程**无 goal 创建事件**、
+   `{"kind":"user","relayedBy":"dsh-chatgpt-helm"}`（GUI 侧正常显示原文）；全程**无 goal 创建事件**、
    回合结束**无自动续跑**。
 2. 宿主 API `goal.create` 先建 active goal → `sessions_prompt` 再发指令 →
    事件流出现 `goal/change {"operation":"pause","phase":"paused","revision":+1}`（自动暂停生效）。
+3. `<insert GUI 可见性验收>`
 
 ## 附注
 
 - 已有 goal 的会话被 ChatGPT 指令自动暂停后，想恢复请在 DSH 本机 GUI 操作
   （ChatGPT 侧无 `update_goal` 的人类权威，无法 resume——这是本守卫的预期行为）。
 - 插件升级（`@beforewave/dsh-chatgpt-helm` 换版本）会覆盖 `lib/index.js`，必须重跑
-  `patches/goal-guard.mjs`；若上游修复了该问题（把 helm 注入标记为非 user 来源），
-  补丁会因找不到原文而报错退出，届时删除本补丁即可。
+  `patches/goal-guard.mjs`；DSH CLI 升级会覆盖 dsh-tool-goal，同样重跑。
+- 若上游修复了该问题（把 helm 注入标记为非 user 来源），补丁会因找不到原文而报错退出，
+  届时删除本补丁即可。

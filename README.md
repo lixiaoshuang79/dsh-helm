@@ -126,13 +126,14 @@ ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦
 
 **问题（2026-08-25 代码级定位）**：链路中 `@beforewave/dsh-chatgpt-helm` 插件（DSH web profile）的 `DshAdapter.prompt()` 把 ChatGPT 发来的消息以 `source:{kind:"user"}` 注入 DSH 会话——伪装成「直接人类输入」。而 DSH 的 `create_goal` 权威校验（`dsh-tool-goal` 的 `requireDirectHuman`）只认 `source.kind === "user"` 的回合事件，于是 ChatGPT 一条长任务指令就能让 DSH 开 goal；回合结束 goal 自动注入下一段（`source.kind="goal"`）自主续跑，根本不听 ChatGPT 的指挥。
 
-**修复（`patches/goal-guard.mjs`，幂等补丁）**：对插件 `lib/index.js` 做三处修改——
+**修复（`patches/goal-guard.mjs` v2，幂等补丁）**：两处——对插件 `lib/index.js` 三处修改，另补丁 DSH 核心 `dsh-tool-goal` 权威校验：
 
-1. `createSession`/`prompt()` 的消息注入 `source.kind: "user"` → `"plugin"`（`plugin:"dsh-chatgpt-helm", form:"relay"`）：ChatGPT 指令从此无法通过 `create_goal`/`update_goal` 的人类权威校验（`GOAL_TOOL_DRIVER_REQUIRED` 拒绝），系统提示中「直接人类请求」的 goal 推断前提也不成立；
+1. `createSession`/`prompt()` 的消息注入 `source:{kind:"user"}` → `source:{kind:"user", relayedBy:"dsh-chatgpt-helm"}`：消息在 DSH GUI 正常显示原文（与本人消息一致），但带转发标记；
 2. `prompt()` 注入前：会话存在 active goal 时自动 `pause`（disarm 自动续跑）——存量 goal 也不会在 ChatGPT 指挥期间继续「一段结束自动注入下一段」；
-3. `inject` 数组补充 `"goals"` 服务。
+3. `inject` 数组补充 `"goals"` 服务；
+4. `dsh-tool-goal` 的 `hasDirectHumanInput` 增加 `&& relayedBy === void 0`：带转发标记的消息不算「直接人类输入」，ChatGPT 指令从此无法通过 `create_goal`/`update_goal` 的人类权威校验（`GOAL_TOOL_DRIVER_REQUIRED` 拒绝），系统提示中「直接人类请求」的 goal 推断前提也不成立。
 
-本机 GUI（web）管理 goal 不受影响。应用后需重启 DSH web 生效；插件重装/升级后重跑一次即可（`node patches/goal-guard.mjs`，自动备份 `.bak-goalguard-<ts>`）。端到端验证方法见 `docs/goal-guard.md`。
+本机 GUI 管理 goal 不受影响（web 消息无 relayedBy 标记）。应用后需重启 DSH web 生效；DSH 升级或插件重装/升级后重跑一次即可（`node patches/goal-guard.mjs`，自动备份 `.bak-goalguard-<ts>`）。端到端验证方法见 `docs/goal-guard.md`。
 
 ## 平台支持
 
