@@ -15,12 +15,12 @@
  * ChatGPT 可读原因并按提示切换模型后重试。
  */
 
-/** 允许的模型标识（GPT-5.6 Thinking；宽松匹配各分隔符变体）。 */
-const ALLOWED_RE = /gpt[\s_.-]*5[\s_.-]*6[\s_.-]*thinking/i
+/** 允许的模型标识（GPT-5.6 Thinking / GPT-5.6 Sol；宽松匹配各分隔符变体）。 */
+const ALLOWED_RE = /gpt[\s_.-]*5[\s_.-]*6[\s_.-]*(thinking|sol)/i
 /** 明确拒绝的模型标识（GPT-5.5 Mini 系）。 */
 const REJECTED_RE = /5[\s_.-]*5[\s_.-]*mini/i
 
-export const REQUIRED_MODEL = 'gpt-5-6-thinking'
+export const REQUIRED_MODEL = 'gpt-5-6-thinking / gpt-5-6-sol'
 
 export type ModelGateResult =
   | { ok: true }
@@ -43,13 +43,13 @@ export function rejectionText(r: Extract<ModelGateResult, { ok: false }>): strin
       code: 'model_rejected',
       required_model: REQUIRED_MODEL,
       received: r.received,
-      message: `[模型门禁拒绝] 本次指令未执行：ChatGPT 当前模型为「${r.received}」，不是要求的 ${REQUIRED_MODEL}（GPT-5.6 Thinking）。请切换到 GPT-5.6 Thinking 模型后，以 "[model-check] 当前模型是 gpt-5-6-thinking" 开头重发同一指令。`,
+      message: `[模型门禁拒绝] 本次指令未执行：ChatGPT 当前模型为「${r.received}」，不是要求的 ${REQUIRED_MODEL}（GPT-5.6 Thinking / GPT-5.6 Sol）。请切换到 GPT-5.6 Thinking 或 GPT-5.6 Sol 模型后，以 "[model-check] 当前模型是 <模型全名>" 开头重发同一指令。`,
     })
   }
   return JSON.stringify({
     code: 'model_declaration_required',
     required_model: REQUIRED_MODEL,
-    message: `[模型门禁拒绝] 本次指令未执行：消息中未声明 ChatGPT 模型。请在消息第一行声明 "[model-check] 当前模型是 <模型全名>"（必须是 ${REQUIRED_MODEL} / GPT-5.6 Thinking）后重发同一指令。`,
+    message: `[模型门禁拒绝] 本次指令未执行：消息中未声明 ChatGPT 模型。请在消息第一行声明 "[model-check] 当前模型是 <模型全名>"（必须是 ${REQUIRED_MODEL} / GPT-5.6 Thinking、GPT-5.6 Sol）后重发同一指令。`,
   })
 }
 

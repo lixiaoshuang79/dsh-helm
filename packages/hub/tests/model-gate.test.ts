@@ -22,6 +22,17 @@ describe('checkModelDeclaration', () => {
     }
   })
 
+  it('allows GPT-5.6 Sol (case/delimiter variants)', () => {
+    for (const text of [
+      '[model-check] 当前模型是 gpt-5-6-sol',
+      '[model-check] 当前模型是 GPT-5.6 Sol',
+      'model: gpt5.6sol',
+      '当前模型是 GPT 5 6 Sol，开始执行',
+    ]) {
+      expect(checkModelDeclaration(text).ok, text).toBe(true)
+    }
+  })
+
   it('rejects 5.5-mini declarations with received value', () => {
     const r = checkModelDeclaration('[model-check] 当前模型是 5.5-mini')
     expect(r).toEqual({ ok: false, code: 'model_rejected', received: '5.5-mini' })
