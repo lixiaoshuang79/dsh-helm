@@ -122,6 +122,18 @@ ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦
 - **健康监控**：hub 新增 `GET /metrics`（请求数/平均与最大响应字节/截断与错误计数/活跃连接/perTool 明细）、`GET /readyz`（HA quorum 就绪）、`GET /version`；Dashboard 新增「MCP 控制面」页签展示。
 - **纠错插队/立即干预**：`sessions_prompt` 支持 `mode=queue|steer`（默认 queue 排队语义不变）；`steer` 绕过队列经 DSH 宿主 API 注入运行中回合（结构化返回 `steered/queued/rejected/unavailable`），DSH 历史事件 `agent/inbox/spliced` 证实注入。设计评审与实施细节见 [docs/priority-queue.md](docs/priority-queue.md)。
 
+## Goal 守卫（ChatGPT 指令禁止在 DSH 开启 goal）
+
+**问题（2026-08-25 代码级定位）**：链路中 `@beforewave/dsh-chatgpt-helm` 插件（DSH web profile）的 `DshAdapter.prompt()` 把 ChatGPT 发来的消息以 `source:{kind:"user"}` 注入 DSH 会话——伪装成「直接人类输入」。而 DSH 的 `create_goal` 权威校验（`dsh-tool-goal` 的 `requireDirectHuman`）只认 `source.kind === "user"` 的回合事件，于是 ChatGPT 一条长任务指令就能让 DSH 开 goal；回合结束 goal 自动注入下一段（`source.kind="goal"`）自主续跑，根本不听 ChatGPT 的指挥。
+
+**修复（`patches/goal-guard.mjs`，幂等补丁）**：对插件 `lib/index.js` 做三处修改——
+
+1. `createSession`/`prompt()` 的消息注入 `source.kind: "user"` → `"plugin"`（`plugin:"dsh-chatgpt-helm", form:"relay"`）：ChatGPT 指令从此无法通过 `create_goal`/`update_goal` 的人类权威校验（`GOAL_TOOL_DRIVER_REQUIRED` 拒绝），系统提示中「直接人类请求」的 goal 推断前提也不成立；
+2. `prompt()` 注入前：会话存在 active goal 时自动 `pause`（disarm 自动续跑）——存量 goal 也不会在 ChatGPT 指挥期间继续「一段结束自动注入下一段」；
+3. `inject` 数组补充 `"goals"` 服务。
+
+本机 GUI（web）管理 goal 不受影响。应用后需重启 DSH web 生效；插件重装/升级后重跑一次即可（`node patches/goal-guard.mjs`，自动备份 `.bak-goalguard-<ts>`）。端到端验证方法见 `docs/goal-guard.md`。
+
 ## 平台支持
 
 | 平台 | hub | node agent | presence | 服务自启 |
