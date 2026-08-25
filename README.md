@@ -122,6 +122,20 @@ ChatGPT ↔ DSH connector 长时间运行、大上下文 session 下的响应瘦
 - **健康监控**：hub 新增 `GET /metrics`（请求数/平均与最大响应字节/截断与错误计数/活跃连接/perTool 明细）、`GET /readyz`（HA quorum 就绪）、`GET /version`；Dashboard 新增「MCP 控制面」页签展示。
 - **纠错插队/立即干预**：`sessions_prompt` 支持 `mode=queue|steer`（默认 queue 排队语义不变）；`steer` 绕过队列经 DSH 宿主 API 注入运行中回合（结构化返回 `steered/queued/rejected/unavailable`），DSH 历史事件 `agent/inbox/spliced` 证实注入。设计评审与实施细节见 [docs/priority-queue.md](docs/priority-queue.md)。
 
+## 模型门禁（ChatGPT 指令须声明 gpt-5-6-thinking）
+
+隧道/协议层不带调用方模型（实测确认），因此采用**声明式门禁**：ChatGPT 总导演
+每次下发指令时在消息文本里声明当前模型（`[model-check] 当前模型是 <模型全名>`），
+hub 路由前校验 `sessions_prompt` / `sessions_create(initial_message)`：
+
+- 声明 `gpt-5-6-thinking` → 放行；
+- 声明 `5.5-mini` → 拒绝 `model_rejected`（附 received 原文）；
+- 无声明 → 拒绝 `model_declaration_required`。
+
+被拒返回 MCP isError + 结构化 JSON，ChatGPT 可读原因并切模型重试。
+实现见 `packages/hub/src/mcp/model-gate.ts`，ChatGPT 侧指令模板见
+[docs/model-gate.md](docs/model-gate.md)。
+
 ## Goal 守卫（ChatGPT 指令禁止在 DSH 开启 goal）
 
 **问题（2026-08-25 代码级定位）**：链路中 `@beforewave/dsh-chatgpt-helm` 插件（DSH web profile）的 `DshAdapter.prompt()` 把 ChatGPT 发来的消息以 `source:{kind:"user"}` 注入 DSH 会话——伪装成「直接人类输入」。而 DSH 的 `create_goal` 权威校验（`dsh-tool-goal` 的 `requireDirectHuman`）只认 `source.kind === "user"` 的回合事件，于是 ChatGPT 一条长任务指令就能让 DSH 开 goal；回合结束 goal 自动注入下一段（`source.kind="goal"`）自主续跑，根本不听 ChatGPT 的指挥。
