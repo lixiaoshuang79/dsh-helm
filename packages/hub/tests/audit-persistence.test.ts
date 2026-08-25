@@ -102,7 +102,7 @@ describe('audit persistence', () => {
     const nodes = new NodeRegistry(rig.store.db)
     nodes.markOffline('n-main', 'test')
     const before = rig.audit.count()
-    const res = await rig.mcp.callTool({ name: 'sessions_prompt', arguments: { session_id: 'ghost', message: 'x' } })
+    const res = await rig.mcp.callTool({ name: 'sessions_prompt', arguments: { session_id: 'ghost', message: '[model-check] 当前模型是 gpt-5-6-thinking: x' } })
     expect(res.isError).toBe(true)
     expect(res.content[0]!.text).toContain('route rejected')
     expect(rig.audit.count()).toBe(before) // no audit row for rejected route

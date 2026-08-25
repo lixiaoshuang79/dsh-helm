@@ -117,7 +117,7 @@ describe('HubMcpServer tool surface', () => {
     const s = rig.cp.sessionCatalog()
     s.upsert('n-b', { native_session_id: 'sess-1', status: 'idle' })
     rig.nodeB.sessions.push({ native_session_id: 'sess-1', status: 'idle', live: false })
-    const res = await rig.mcp.callTool({ name: 'sessions_prompt', arguments: { session_id: 'sess-1', message: 'hello' } })
+    const res = await rig.mcp.callTool({ name: 'sessions_prompt', arguments: { session_id: 'sess-1', message: '[model-check] 当前模型是 gpt-5-6-thinking: hello' } })
     expect(res.isError).toBeFalsy()
     const parsed = JSON.parse(res.content[0]!.text)
     expect(parsed.reply).toContain('remote')

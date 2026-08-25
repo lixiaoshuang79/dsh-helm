@@ -184,14 +184,14 @@ describe('MCP Context Isolation 端到端（真实 hub + HTTP /mcp 全链路）'
     try {
       e.reconcileSession('sess-p2')
       // mode=steer 显式透传
-      const steer = await mcpCall(e.port, 'sessions_prompt', { session_id: 'sess-p2', message: '立即停止', mode: 'steer' })
+      const steer = await mcpCall(e.port, 'sessions_prompt', { session_id: 'sess-p2', message: '[model-check] 当前模型是 gpt-5-6-thinking: 立即停止', mode: 'steer' })
       expect(steer.result?.isError).toBeFalsy()
-      expect(e.node.lastMcpCall).toMatchObject({ tool: 'sessions_prompt', args: { session_id: 'sess-p2', message: '立即停止', mode: 'steer' } })
+      expect(e.node.lastMcpCall).toMatchObject({ tool: 'sessions_prompt', args: { session_id: 'sess-p2', message: '[model-check] 当前模型是 gpt-5-6-thinking: 立即停止', mode: 'steer' } })
       // 缺省（不带 mode）→ 参数原样透传（agent 按 queue 处理）
       e.node.lastMcpCall = undefined
-      const plain = await mcpCall(e.port, 'sessions_prompt', { session_id: 'sess-p2', message: 'hello' })
+      const plain = await mcpCall(e.port, 'sessions_prompt', { session_id: 'sess-p2', message: '[model-check] 当前模型是 gpt-5-6-thinking: hello' })
       expect(plain.result?.isError).toBeFalsy()
-      expect(e.node.lastMcpCall).toMatchObject({ args: { session_id: 'sess-p2', message: 'hello' } })
+      expect(e.node.lastMcpCall).toMatchObject({ args: { session_id: 'sess-p2', message: '[model-check] 当前模型是 gpt-5-6-thinking: hello' } })
     } finally {
       await e.cleanup()
     }

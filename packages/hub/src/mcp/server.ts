@@ -21,6 +21,7 @@ import { ControlPlane } from '../control-plane.js'
 import { TOOL_BY_NAME, WRITE_TOOLS, type ToolDef } from './tools.js'
 import { applyGuard } from './guard.js'
 import { McpMetrics } from './metrics.js'
+import { checkModelDeclaration, rejectionText, MODEL_GATED_TOOLS } from './model-gate.js'
 
 export interface HubMcpServerOptions {
   cp: ControlPlane
@@ -95,6 +96,18 @@ export class HubMcpServer {
     const args = call.arguments ?? {}
     const callId = `mcp-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`
     try {
+      // Model declaration gate（P4）：ChatGPT 链路的声明式模型门禁。对消息
+      // 注入工具校验消息文本里的模型声明（隧道不带模型信息，只能声明式）。
+      if (MODEL_GATED_TOOLS.has(def.name)) {
+        const gateText = def.name === 'sessions_prompt' ? args.message : args.initial_message
+        if (typeof gateText === 'string' && gateText.trim()) {
+          const gate = checkModelDeclaration(gateText)
+          if (!gate.ok) {
+            this.log(`model gate ${gate.code} on ${def.name}`)
+            return this.finish({ content: [{ type: 'text', text: rejectionText(gate) }], isError: true }, def.name, gate.code)
+          }
+        }
+      }
       if (def.discovery) {
         return this.finish(await this.handleDiscovery(def, args, callId), def.name)
       }

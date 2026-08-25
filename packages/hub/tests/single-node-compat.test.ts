@@ -108,7 +108,7 @@ describe('single-node local compat mode', () => {
   it('no-route fail-closed still guards destructive ops when node offline', async () => {
     await settle()
     rig.nodes.markOffline('n-main', 'test')
-    const res = await rig.mcp.callTool({ name: 'sessions_prompt', arguments: { session_id: 'ghost', message: 'x' } })
+    const res = await rig.mcp.callTool({ name: 'sessions_prompt', arguments: { session_id: 'ghost', message: '[model-check] 当前模型是 gpt-5-6-thinking: x' } })
     expect(res.isError).toBe(true)
     expect(res.content[0]!.text).toContain('route rejected')
   })

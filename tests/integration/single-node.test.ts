@@ -183,7 +183,7 @@ describe('single-node connector upgrade (hub + one agent, node_id == defaultNode
       await settle()
       const out = await rig.mcp.callTool({
         name: 'sessions_prompt',
-        arguments: { session_id: 's-local', message: '列出当前工作区' },
+        arguments: { session_id: 's-local', message: '[model-check] 当前模型是 gpt-5-6-thinking: 列出当前工作区' },
       })
       expect(out.isError).not.toBe(true)
       const text = String(out.content?.[0]?.text ?? '')
@@ -227,7 +227,7 @@ describe('single-node connector upgrade (hub + one agent, node_id == defaultNode
       await settle()
       const out = await rig.mcp.callTool({
         name: 'sessions_prompt',
-        arguments: { session_id: 's-local', message: '先跑 lint 再提交', mode: 'steer' },
+        arguments: { session_id: 's-local', message: '[model-check] 当前模型是 gpt-5-6-thinking: 先跑 lint 再提交', mode: 'steer' },
       })
       const parsed = JSON.parse(String(out.content?.[0]?.text ?? '')) as Record<string, unknown>
       expect(parsed.status).toBe('steered')
@@ -250,7 +250,7 @@ describe('single-node connector upgrade (hub + one agent, node_id == defaultNode
       await settle()
       const out = await rig.mcp.callTool({
         name: 'sessions_prompt',
-        arguments: { session_id: 's-local', message: '先跑 lint', mode: 'steer' },
+        arguments: { session_id: 's-local', message: '[model-check] 当前模型是 gpt-5-6-thinking: 先跑 lint', mode: 'steer' },
       })
       const parsed = JSON.parse(String(out.content?.[0]?.text ?? '')) as Record<string, unknown>
       expect(parsed.status).toBe('unavailable')
@@ -258,7 +258,7 @@ describe('single-node connector upgrade (hub + one agent, node_id == defaultNode
       // 随后 queue 调用（默认 mode）经 backend 正常处理
       const next = await rig.mcp.callTool({
         name: 'sessions_prompt',
-        arguments: { session_id: 's-local', message: '继续' },
+        arguments: { session_id: 's-local', message: '[model-check] 当前模型是 gpt-5-6-thinking: 继续' },
       })
       expect(JSON.parse(String(next.content?.[0]?.text ?? ''))).toMatchObject({ ok: true })
     } finally {
