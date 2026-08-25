@@ -38,7 +38,8 @@ dsh-helm init
 # 3) 编辑 ~/.dsh/helm/node.json：
 #    - hub_url: ws://127.0.0.1:3470（单机；多机/生产用 tailnet IP / wss://）
 #    - local_mcp_url / local_mcp_token：默认值已指向本机 daemon 3457，无需改
-#    （daemon Bearer token 在 ~/.agent-chatgpt-helm/token，自动生成）
+#    （daemon Bearer token 自动生成：agent-helm >=0.1.2 在 ~/.agent-helm/token，
+#    旧版 ~/.agent-chatgpt-helm/token 兜底，agent 自动探测）
 
 # 4) 启动本地控制面（mesh 3470 + MCP 3471，默认只绑 127.0.0.1）
 dsh-helm hub &
